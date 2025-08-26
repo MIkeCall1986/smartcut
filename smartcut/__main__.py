@@ -58,14 +58,55 @@ class Progress:
         self.tqdm.update(1)
 
 def main():
-    parser = argparse.ArgumentParser(description="SmartCut CLI tool for video editing")
-    parser.add_argument('input', type=str, help="Input media file path")
-    parser.add_argument('output', type=str, help="Output media file path")
-    parser.add_argument('--keep', type=str, help="Comma-separated list of start,end times to keep in seconds")
-    parser.add_argument('--cut', type=str, help="Comma-separated list of start,end times to cut in seconds")
-    parser.add_argument('--frames', action='store_true', help="Keep/Cut list is frame numbers, not times (frames are zero-indexed, and -1 means \"last frame of the video\")")
-    parser.add_argument('--log-level', type=str, default='warning', help="Log level (default: warning)")
-    parser.add_argument('--version', action='version', version='Smartcut 1.2.0')
+    description = (
+        "SmartCut - Efficient video cutting with minimal recoding. "
+        "Only segments around cutpoints are re-encoded, preserving original quality "
+        "for the majority of the video. Supports various formats including MP4, MKV, AVI, MOV."
+    )
+
+    epilog = """
+examples:
+  Keep segments from 10-20s and 40-50s:
+    smartcut input.mp4 output.mp4 --keep 10,20,40,50
+
+  Cut out segments from 30-40s and 1m-1m10s:
+    smartcut input.mp4 output.mp4 --cut 30,40,01:00,01:10
+
+  Use frame numbers instead of times:
+    smartcut input.mp4 output.mp4 --keep 300,600,1200,1500 --frames
+
+  Cut using different time formats (mix seconds and minutes syntax):
+    smartcut input.mp4 output.mp4 --keep 90,2:45,3:00,4:00
+
+time formats:
+  - Seconds: 10, 30.5, 120
+  - MM:SS: 01:30, 02:45
+  - HH:MM:SS: 01:30:45
+"""
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument('input', metavar='INPUT', type=str,
+                       help="Input media file (MP4, MKV, AVI, MOV, etc.)")
+    parser.add_argument('output', metavar='OUTPUT', type=str,
+                       help="Output media file path")
+    parser.add_argument('--keep', metavar='SEGMENTS', type=str,
+                       help="Keep specified time segments. Format: start1,end1,start2,end2,... "
+                            "Times can be in seconds (10), MM:SS (01:30), or HH:MM:SS (01:30:45)")
+    parser.add_argument('--cut', metavar='SEGMENTS', type=str,
+                       help="Remove specified time segments (opposite of --keep). "
+                            "Same time format as --keep option")
+    parser.add_argument('--frames', action='store_true',
+                       help="Interpret --keep/--cut values as frame numbers instead of times. "
+                            "Frames are zero-indexed. Use -1 for the last frame")
+    parser.add_argument('--log-level', choices=['warning', 'error', 'fatal'],
+                       default='warning', metavar='LEVEL',
+                       help="Set logging verbosity level (default: %(default)s)")
+    parser.add_argument('--version', action='version', version='Smartcut 1.3.0')
 
     args = parser.parse_args()
 
