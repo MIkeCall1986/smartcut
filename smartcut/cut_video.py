@@ -78,11 +78,20 @@ def make_cut_segments(media_container: MediaContainer,
 
     return cut_segments
 
+def map_codec_name_for_pyav15(codec_name: str) -> str:
+    """Map decoder names to encoder names for PyAV 15.0"""
+    codec_mapping = {
+        'libdav1d': 'libaom-av1',  # AV1 decoder to encoder
+    }
+    return codec_mapping.get(codec_name, codec_name)
+
 class PassthruAudioCutter:
     def __init__(self, media_container: MediaContainer, output_av_container: av.container.Container,
                 track_index: int, export_settings: AudioExportSettings):
         self.track = media_container.audio_tracks[track_index]
-        self.out_stream = output_av_container.add_stream(template=self.track.av_stream)
+
+        self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
+
         self.out_stream.metadata.update(self.track.av_stream.metadata)
         self.segment_start_in_output = 0
         self.prev_dts = -100_000
@@ -126,7 +135,7 @@ class SubtitleCutter:
         self.packets = media_container.subtitle_tracks[subtitle_track_index]
 
         self.in_stream = media_container.av_containers[0].streams.subtitles[subtitle_track_index]
-        self.out_stream = output_av_container.add_stream(template=self.in_stream)
+        self.out_stream = output_av_container.add_stream_from_template(self.in_stream)
         self.out_stream.metadata.update(self.in_stream.metadata)
         self.segment_start_in_output = 0
         self.prev_pts = -100_000
@@ -208,10 +217,11 @@ class VideoCutter:
         self.input_av_container: av.container.Container = av.open(media_container.path, 'r', metadata_errors='ignore')
 
         if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
-            self.out_stream = output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate)
+            self.out_stream = output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'})
             self.out_stream.width = self.in_stream.width
             self.out_stream.height = self.in_stream.height
-            self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
+            if self.in_stream.sample_aspect_ratio is not None:
+                self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
             self.codec_name = video_settings.codec_override
 
             self.init_encoder()
@@ -220,8 +230,24 @@ class VideoCutter:
             self.enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
         else:
-            self.out_stream = output_av_container.add_stream(template=self.in_stream)
-            self.codec_name = self.in_stream.codec_context.name
+            # Map codec name for decoder to encoder compatibility (AV1 case)
+            original_codec_name = self.in_stream.codec_context.name
+            mapped_codec_name = map_codec_name_for_pyav15(original_codec_name)
+
+            if mapped_codec_name != original_codec_name:
+                # Need to create stream with mapped codec name, not template
+                self.out_stream = output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate)
+                self.out_stream.width = self.in_stream.width
+                self.out_stream.height = self.in_stream.height
+                if self.in_stream.sample_aspect_ratio is not None:
+                    self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
+                self.codec_name = mapped_codec_name
+            else:
+                # Use template if no mapping needed
+                self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
+                self.codec_name = original_codec_name
+
+
             # if self.codec_name == 'mpeg2video':
                 # self.out_stream.average_rate = self.in_stream.average_rate
                 # self.out_stream.base_rate = self.in_stream.base_rate
@@ -427,19 +453,22 @@ class VideoCutter:
         if self.enc_codec is None:
             muxing_codec = self.out_stream.codec_context
             enc_codec = av.CodecContext.create(self.codec_name, 'w')
-            enc_codec.rate = muxing_codec.rate
+
+            if muxing_codec.rate is not None:
+                enc_codec.rate = muxing_codec.rate
             enc_codec.options.update(self.encoding_options)
 
             enc_codec.width = muxing_codec.width
             enc_codec.height = muxing_codec.height
             enc_codec.pix_fmt = muxing_codec.pix_fmt
-            enc_codec.sample_aspect_ratio = muxing_codec.sample_aspect_ratio
+
+            if muxing_codec.sample_aspect_ratio is not None:
+                enc_codec.sample_aspect_ratio = muxing_codec.sample_aspect_ratio
             if self.codec_name == 'mpeg2video':
                 enc_codec.time_base = Fraction(1, muxing_codec.rate)
             else:
                 enc_codec.time_base = self.out_stream.time_base
             enc_codec.flags = muxing_codec.flags
-            enc_codec.global_header = False # Force writing of headers to the output stream
             if muxing_codec.bit_rate is not None:
                 enc_codec.bit_rate = muxing_codec.bit_rate
             if muxing_codec.bit_rate_tolerance is not None:
@@ -647,12 +676,27 @@ def smart_cut(media_container: MediaContainer, positive_segments: List[tuple[Fra
                         if packet.dts < -900_000:
                             packet.dts = None
 
+                        # Fix AVI format PTS/DTS ordering requirement
+                        # AVI format requires PTS >= DTS (decode timestamp cannot be after presentation)
+                        if (out_path.lower().endswith('.avi') and packet.dts is not None and
+                            packet.pts is not None and packet.pts < packet.dts):
+                            # Always adjust PTS up to match DTS to preserve decode order
+                            packet.pts = packet.dts
+
                         # print(packet)
                         output_av_container.mux(packet)
             for g in generators:
                 for packet in g.finish():
                     # if isinstance(g, VideoCutter):
                     # print("finish packet: ", packet)
+
+                    # Fix AVI format PTS/DTS ordering requirement
+                    # AVI format requires PTS >= DTS (decode timestamp cannot be after presentation)
+                    if (out_path.lower().endswith('.avi') and packet.dts is not None and
+                        packet.pts is not None and packet.pts < packet.dts):
+                        # Always adjust PTS up to match DTS to preserve decode order
+                        packet.pts = packet.dts
+
                     output_av_container.mux(packet)
             if progress is not None:
                 progress.emit(previously_done_segments)

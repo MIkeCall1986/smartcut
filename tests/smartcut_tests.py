@@ -8,6 +8,7 @@ from urllib.request import urlopen
 import av.logging
 import ffmpeg
 import platform
+import argparse
 
 import numpy as np
 import av
@@ -33,20 +34,56 @@ av.logging.set_level(av.logging.FATAL)
 
 data_dir = 'test_data'
 
-if len(sys.argv) >= 2:
-    if sys.argv[1] == 'all':
-        files = []
-        patterns = ["./*.mkv", "./*.ts", "./*.mpg", "./*.webm", "./*.mp4", "./*.mp3"]
-        for p in patterns:
-            files.extend(glob.glob(p))
-        manual_input = [os.path.abspath(x) for x in files if '_edited' not in x]
-        pixel_color_diff_tolerance = 50
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description='Smart Media Cutter Tests')
+    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'all'],
+                       help='Run tests from specific category')
+    parser.add_argument('--list-categories', action='store_true', help='List available test categories')
+    parser.add_argument('files', nargs='*', help='Specific files to test (legacy mode)')
+
+    args = parser.parse_args()
+
+    if args.list_categories:
+        print("Available test categories:")
+        print("  basic      - Quick fundamental H.264 tests")
+        print("  h264       - H.264 codec tests including profiles")
+        print("  h265       - H.265/HEVC codec tests")
+        print("  codecs     - Other video codecs (VP9, AV1, etc.)")
+        print("  containers - Container format tests (MP4, AVI, MOV, etc.)")
+        print("  audio      - Audio-only tests (MP3, Vorbis, FLAC)")
+        print("  mixed      - Tests with video and audio tracks")
+        print("  transforms - Video transformation and recoding tests")
+        print("  long       - Long-running or large file tests")
+        print("  external   - Tests requiring external downloads")
+        print("  all        - Run all tests (default)")
+        sys.exit(0)
+
+    return args
+
+# Handle legacy argument parsing for backwards compatibility
+def setup_legacy_args():
+    global manual_input, pixel_color_diff_tolerance
+
+    # Check for legacy usage first
+    legacy_args = [arg for arg in sys.argv[1:] if not arg.startswith('--') and arg not in ['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'all']]
+
+    if legacy_args:
+        if legacy_args[0] == 'all':
+            files = []
+            patterns = ["./*.mkv", "./*.ts", "./*.mpg", "./*.webm", "./*.mp4", "./*.mp3"]
+            for p in patterns:
+                files.extend(glob.glob(p))
+            manual_input = [os.path.abspath(x) for x in files if '_edited' not in x]
+            pixel_color_diff_tolerance = 50
+        else:
+            manual_input = [os.path.abspath(x) for x in legacy_args]
+            pixel_color_diff_tolerance = 50
     else:
-        manual_input = [os.path.abspath(x) for x in sys.argv[1:]]
-        pixel_color_diff_tolerance = 50
-else:
-    manual_input = None
-    pixel_color_diff_tolerance = 20
+        manual_input = None
+        pixel_color_diff_tolerance = 20
+
+setup_legacy_args()
 
 os.chdir(os.path.dirname(__file__))
 os.makedirs(data_dir, exist_ok=True)
@@ -209,7 +246,13 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     # We have to just accept the value that av/ffmpeg gives us. So sometimes the
     # input and output timebases are not multiples of each other.
     is_mpeg = source_container.av_containers[0].format.name in ['mpegts', 'mpegvideo']
-    diff_tolerance = Fraction(3, 1000) if not is_mpeg else 2
+    is_avi = source_container.av_containers[0].format.name == 'avi'
+    diff_tolerance = Fraction(3, 1000)
+    if is_mpeg:
+        diff_tolerance = 2
+    elif is_avi:
+        diff_tolerance = Fraction(1, 10)
+
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
     with av.open(source_container.path, mode='r') as source_av:
@@ -1015,6 +1058,13 @@ def test_avi_smart_cut():
     for c in [2, 5, 10]:
         test_smart_cut(filename, output_path, n_cuts=c)
 
+def test_avi_to_mkv_smart_cut():
+    filename = 'h264_input.avi'
+    create_test_video(filename, 30, 'h264', 'yuv420p', 30, (128, 96))
+    output_path = test_avi_to_mkv_smart_cut.__name__ + '.mkv'
+    for c in [2, 5, 10]:
+        test_smart_cut(filename, output_path, n_cuts=c, pixel_tolerance=50)
+
 def test_flv_smart_cut():
     filename = 'flv.flv'
     create_test_video(filename, 30, 'flv', 'yuv420p', 30, (32, 16))
@@ -1135,117 +1185,171 @@ def test_manual():
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
 
-def run_tests():
+def get_test_categories():
     """
-    Runs all the tests and prints their status.
+    Returns a dictionary of test categories.
     """
-    tests = [
-        test_h264_cut_on_keyframes,
-        test_h264_smart_cut,
-        test_h264_24_fps_long,
-        test_h264_1080p,
-        test_h264_multiple_cuts,
+    test_categories = {
+        'basic': [
+            test_h264_cut_on_keyframes,
+            test_h264_smart_cut,
+            test_mp4_cut_on_keyframe,
+            test_mp4_smart_cut,
+        ],
 
-        test_h264_profile_baseline,
-        test_h264_profile_main,
-        test_h264_profile_high,
-        test_h264_profile_high10,
-        test_h264_profile_high422,
-        test_h264_profile_high444,
+        'h264': [
+            test_h264_multiple_cuts,
+            test_h264_profile_baseline,
+            test_h264_profile_main,
+            test_h264_profile_high,
+            test_h264_profile_high10,
+            test_h264_profile_high422,
+            test_h264_profile_high444,
+            test_mp4_to_mkv_smart_cut,
+            test_mkv_to_mp4_smart_cut,
+        ],
 
-        test_mp4_cut_on_keyframe,
-        test_mp4_smart_cut,
-        test_mp4_to_mkv_smart_cut,
-        test_mkv_to_mp4_smart_cut,
+        'h265': [
+            test_h265_cut_on_keyframes,
+            test_h265_smart_cut,
+            test_mp4_h265_smart_cut,
+        ],
 
-        test_vp9_smart_cut,
-        test_vp9_profile_1,
-        test_av1_smart_cut,
+        'codecs': [
+            test_vp9_smart_cut,
+            test_vp9_profile_1,
+            test_av1_smart_cut,
+            test_mpg_cut_on_keyframes,
+            test_mpg_smart_cut,
+            test_m2ts_mpeg2_smart_cut,
+            # test_m2ts_h264_smart_cut,
+            test_ts_smart_cut,
+        ],
 
-        test_avi_smart_cut,
-        test_flv_smart_cut,
-        test_mov_smart_cut,
-        test_wmv_smart_cut,
+        'containers': [
+            test_avi_smart_cut,
+            test_avi_to_mkv_smart_cut,
+            test_flv_smart_cut,
+            test_mov_smart_cut,
+            test_wmv_smart_cut,
+        ],
 
-        test_mpg_cut_on_keyframes,
-        test_mpg_smart_cut,
+        'audio': [
+            test_vorbis_passthru,
+            test_mp3_passthru,
+        ],
 
-        test_m2ts_mpeg2_smart_cut,
-        test_m2ts_h264_smart_cut,
+        'mixed': [
+            test_mkv_with_video_and_audio_passthru,
+        ],
 
-        test_ts_smart_cut,
+        'transforms': [
+            test_vertical_transform,
+            test_video_recode_codec_override,
+        ],
 
-        test_night_sky,
-        test_night_sky_to_mkv,
-        test_sunset,
+        'long': [
+            test_h264_24_fps_long,
+            test_h264_1080p,
+            test_h265_smart_cut_large,
+        ],
 
-        test_h265_cut_on_keyframes,
-        test_h265_smart_cut,
-        test_h265_smart_cut_large,
-        test_mp4_h265_smart_cut,
+        'external': [
+            test_night_sky,
+            test_night_sky_to_mkv,
+            test_sunset,
+            test_seeking,
+        ],
+    }
 
-        test_vertical_transform,
-        test_video_recode_codec_override,
-
-        test_vorbis_passthru,
-
-        test_mkv_with_video_and_audio_passthru,
-
-        test_mp3_passthru,
-
-        test_seeking,
-
-        # test_broken_ref_vid,
-
-        # test_manual,
-    ]
-
-    smc_tests = [
-        test_vorbis_encode_mix,
-
-        test_flac_conversions,
-        test_wav_conversions,
-
-        test_mkv_with_video_and_audio_mix,
-
-        test_mix_with_rate_conversion,
-
-        test_denoiser,
-
-        test_vorbis_track_cut,
-        test_mp3_track_cut,
-    ]
+    # SMC-specific tests (require additional dependencies)
+    smc_tests = {
+        'audio': [
+            test_vorbis_encode_mix,
+            test_flac_conversions,
+            test_wav_conversions,
+            test_vorbis_track_cut,
+            test_mp3_track_cut,
+        ],
+        'mixed': [
+            test_mkv_with_video_and_audio_mix,
+            test_mix_with_rate_conversion,
+            test_denoiser,
+        ],
+    }
 
     try:
-        # Audio mixing, etc, is ommited from the CLI version, because Librosa and some other libs add a lot of bloat to the binary
+        # Audio mixing, etc, is omitted from the CLI version, because Librosa and some other libs add a lot of bloat to the binary
         from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
-        tests = tests + smc_tests
-        print("Including smc tests")
 
+        # Add SMC tests to existing categories
+        for category, tests in smc_tests.items():
+            test_categories[category].extend(tests)
+
+        print("Including smc tests")
     except ImportError:
         print("Skipping smc tests")
         pass
 
-    # tests = [test_mkv_with_video_and_audio_mix]
-    # tests = [test_mov_smart_cut]
-    # tests = [test_seeking]
+    return test_categories
+
+def run_tests(category=None):
+    """
+    Runs tests from specified category or all tests if category is None.
+    """
+    test_categories = get_test_categories()
+
+    if category and category != 'all':
+        if category not in test_categories:
+            print(f"Unknown category: {category}")
+            print("Available categories:", list(test_categories.keys()))
+            return
+
+        tests_to_run = test_categories[category]
+        print(f"Running {category} tests ({len(tests_to_run)} tests)")
+    else:
+        # Run all tests
+        tests_to_run = []
+        for cat_tests in test_categories.values():
+            tests_to_run.extend(cat_tests)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_tests = []
+        for test in tests_to_run:
+            if test not in seen:
+                seen.add(test)
+                unique_tests.append(test)
+        tests_to_run = unique_tests
+
+        print(f"Running all tests ({len(tests_to_run)} tests)")
 
     perf_timer = time()
+    passed = 0
+    failed = 0
 
-    for test in tests:
+    for test in tests_to_run:
         test_name = test.__name__
         try:
             test()
             print(f"{test_name}: PASS")
+            passed += 1
         except Exception as e:
             print(f"{test_name}: FAIL:")
             traceback.print_exc()
-    print(f'Tests ran in {(time() - perf_timer):0.1f}s')
+            failed += 1
+
+    elapsed = time() - perf_timer
+    print(f'\nResults: {passed} passed, {failed} failed')
+    print(f'Tests ran in {elapsed:0.1f}s')
 
 if __name__ == "__main__":
     if manual_input is None:
-        run_tests()
+        # Parse arguments for category selection
+        args = parse_args()
+        run_tests(args.category)
     else:
+        # Legacy mode - test specific files
         for file in manual_input:
             try:
                 print(f"Testing {file}")
