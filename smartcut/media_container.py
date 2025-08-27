@@ -9,6 +9,60 @@ import numpy as np
 def ts_to_time(ts):
     return Fraction(round(ts*1000), 1000)
 
+def get_h265_nal_unit_type(packet_data):
+    """
+    Extract NAL unit type from H.265/HEVC packet data.
+    Returns the NAL unit type, or None if it cannot be determined.
+
+    H.265 NAL unit types:
+    - 19, 20: IDR frames (safe cut points)
+    - 21: CRA frame (not safe for cutting due to RASL pictures)
+    """
+    if not packet_data or len(packet_data) < 6:
+        return None
+
+    data = bytes(packet_data)
+
+    # H.265 in MP4 containers uses length-prefixed NAL units, not Annex B start codes
+    # Try MP4/ISOBMFF format first (4-byte length prefix)
+    if len(data) >= 6:
+        # Read the first NAL unit length (big-endian 4 bytes)
+        nal_length = int.from_bytes(data[:4], byteorder='big')
+        if nal_length > 0 and nal_length <= len(data) - 4:
+            # Found valid length-prefixed NAL unit
+            nal_header = data[4:6]
+            nal_unit_type = (nal_header[0] >> 1) & 0x3F
+            return nal_unit_type
+
+    # Fallback: Try Annex B format (start codes)
+    # Check for 4-byte start code (0x00000001)
+    if data[:4] == b'\x00\x00\x00\x01':
+        nal_header = data[4:6] if len(data) >= 6 else None
+    # Check for 3-byte start code (0x000001)
+    elif data[:3] == b'\x00\x00\x01':
+        nal_header = data[3:5] if len(data) >= 5 else None
+    else:
+        # Try to find start code within the first few bytes
+        for i in range(min(10, len(data) - 3)):
+            if data[i:i+4] == b'\x00\x00\x00\x01':
+                nal_header = data[i+4:i+6] if len(data) >= i+6 else None
+                break
+            elif data[i:i+3] == b'\x00\x00\x01':
+                nal_header = data[i+3:i+5] if len(data) >= i+5 else None
+                break
+        else:
+            return None
+
+    if not nal_header or len(nal_header) < 2:
+        return None
+
+    # H.265 NAL unit header is 2 bytes
+    # First byte: forbidden_zero_bit(1) + nal_unit_type(6) + nuh_layer_id(6 bits, but only lower 3 in first byte)
+    # Second byte: nuh_layer_id(upper 3 bits) + nuh_temporal_id_plus1(3)
+
+    nal_unit_type = (nal_header[0] >> 1) & 0x3F  # Extract bits 1-6
+    return nal_unit_type
+
 @dataclass
 class AudioTrack():
     media_container: object
@@ -121,11 +175,20 @@ class MediaContainer:
             est_eof_time = max(est_eof_time, (packet.pts + packet.duration) * packet.time_base)
             if packet.stream.type == 'video':
                 if packet.is_keyframe:
-                    video_keyframe_indices.append(len(frame_pts))
-                    dts = packet.dts if packet.dts is not None else -100_000_000
-                    self.gop_start_times_dts.append(dts)
-                    if last_seen_video_dts > 0:
-                        self.gop_end_times_dts.append(last_seen_video_dts)
+                    # For H.265, filter out CRA frames (NAL type 21) as they're not safe cut points
+                    is_safe_keyframe = True
+                    if self.video_stream and self.video_stream.codec_context.name == 'hevc':
+                        nal_type = get_h265_nal_unit_type(bytes(packet))
+                        if nal_type is not None:
+                            if nal_type not in [19, 20]:  # 19 and 20 are IDR frames - safe for cutting
+                                is_safe_keyframe = False # Safe to use as cut point
+                                print(f"Found non IDR keyframe {nal_type}")
+                    if is_safe_keyframe:
+                        video_keyframe_indices.append(len(frame_pts))
+                        dts = packet.dts if packet.dts is not None else -100_000_000
+                        self.gop_start_times_dts.append(dts)
+                        if last_seen_video_dts > 0:
+                            self.gop_end_times_dts.append(last_seen_video_dts)
                 last_seen_video_dts = packet.dts
                 frame_pts.append(packet.pts)
             elif packet.stream.type == 'audio':
