@@ -48,3 +48,4 @@ class CutSegment:
     end_time: int
     gop_start_dts: int = -1
     gop_end_dts: int = -1
+    gop_index: int = -1

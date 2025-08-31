@@ -6,131 +6,10 @@ import av.stream
 import av.video
 import numpy as np
 
+from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type
+
 def ts_to_time(ts):
     return Fraction(round(ts*1000), 1000)
-
-def get_h265_nal_unit_type(packet_data):
-    """
-    Extract NAL unit type from H.265/HEVC packet data.
-    For packets with multiple NAL units, returns safe IDR/BLA type if found,
-    otherwise returns the first NAL unit type.
-
-    H.265 NAL unit types:
-    - 16-18: BLA frames (safe cut points)
-    - 19, 20: IDR frames (safe cut points)
-    - 21: CRA frame (not safe for cutting due to RASL pictures)
-    - 32, 33, 34: VPS, SPS, PPS (parameter sets)
-    - 35: AUD (Access Unit Delimiter)
-    """
-    if not packet_data or len(packet_data) < 6:
-        return None
-
-    data = bytes(packet_data)
-
-    # H.265 in MP4 containers uses length-prefixed NAL units, not Annex B start codes
-    # Try MP4/ISOBMFF format first (4-byte length prefix)
-    # But avoid false positive detection of Annex B start codes (0x00000001)
-    if len(data) >= 6:
-        # Read the first NAL unit length (big-endian 4 bytes)
-        nal_length = int.from_bytes(data[:4], byteorder='big')
-        # Avoid misinterpreting Annex B start codes as MP4 lengths
-        # Annex B start codes are 0x00000001 or 0x000001, which would be lengths 1 or very small
-        if nal_length > 4 and nal_length <= len(data) - 4:
-            # Found valid length-prefixed NAL unit
-            nal_header = data[4:6]
-            nal_unit_type = (nal_header[0] >> 1) & 0x3F
-            return nal_unit_type
-
-    # Try Annex B format (start codes) - search entire packet for safe keyframes
-    nal_types_found = []
-    i = 0
-    while i < len(data) - 5:  # H.265 needs 2 bytes for NAL header
-        if data[i:i+4] == b'\x00\x00\x00\x01':
-            if i + 6 <= len(data):
-                nal_header = data[i+4:i+6]
-                nal_type = (nal_header[0] >> 1) & 0x3F
-                nal_types_found.append(nal_type)
-                # Found safe keyframe - prioritize these
-                if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
-                    return nal_type
-            i += 4
-        elif data[i:i+3] == b'\x00\x00\x01':
-            if i + 5 <= len(data):
-                nal_header = data[i+3:i+5]
-                nal_type = (nal_header[0] >> 1) & 0x3F
-                nal_types_found.append(nal_type)
-                # Found safe keyframe - prioritize these
-                if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
-                    return nal_type
-            i += 3
-        else:
-            i += 1
-
-    # No safe keyframe found, return first NAL type if any were found
-    if nal_types_found:
-        return nal_types_found[0]
-
-    return None
-
-def get_h264_nal_unit_type(packet_data):
-    """
-    Extract NAL unit type from H.264/AVC packet data.
-    For packets with multiple NAL units, returns type 5 (IDR) if found,
-    otherwise returns the first NAL unit type.
-
-    H.264 NAL unit types:
-    - 5: IDR frame (safe cut point)
-    - 1: Non-IDR slice (not safe for cutting if it's an I-frame)
-    - 7, 8: SPS, PPS (parameter sets)
-    - 9: AUD (Access Unit Delimiter)
-    """
-    if not packet_data or len(packet_data) < 5:
-        return None
-
-    data = bytes(packet_data)
-
-    # H.264 in MP4 containers uses length-prefixed NAL units, not Annex B start codes
-    # Try MP4/ISOBMFF format first (4-byte length prefix)
-    # But avoid false positive detection of Annex B start codes (0x00000001)
-    if len(data) >= 5:
-        # Read the first NAL unit length (big-endian 4 bytes)
-        nal_length = int.from_bytes(data[:4], byteorder='big')
-        # Avoid misinterpreting Annex B start codes as MP4 lengths
-        # Annex B start codes are 0x00000001 or 0x000001, which would be lengths 1 or very small
-        if nal_length > 4 and nal_length <= len(data) - 4:
-            # Found valid length-prefixed NAL unit
-            nal_header = data[4]
-            nal_unit_type = nal_header & 0x1F  # H.264 uses lower 5 bits
-            return nal_unit_type
-
-    # Try Annex B format (start codes) - search entire packet for IDR frames
-    nal_types_found = []
-    i = 0
-    while i < len(data) - 4:
-        if data[i:i+4] == b'\x00\x00\x00\x01':
-            if i + 4 < len(data):
-                nal_header = data[i+4]
-                nal_type = nal_header & 0x1F
-                nal_types_found.append(nal_type)
-                if nal_type == 5:  # Found IDR frame - this is what we want!
-                    return 5
-            i += 4
-        elif data[i:i+3] == b'\x00\x00\x01':
-            if i + 3 < len(data):
-                nal_header = data[i+3]
-                nal_type = nal_header & 0x1F
-                nal_types_found.append(nal_type)
-                if nal_type == 5:  # Found IDR frame - this is what we want!
-                    return 5
-            i += 3
-        else:
-            i += 1
-
-    # No IDR frame found, return first NAL type if any were found
-    if nal_types_found:
-        return nal_types_found[0]
-
-    return None
 
 @dataclass
 class AudioTrack():
@@ -181,6 +60,7 @@ class MediaContainer:
 
     gop_start_times_dts: list[int]
     gop_end_times_dts: list[int]
+    gop_start_nal_types: list[int | None]  # NAL type of first picture frame after each GOP boundary
 
     audio_tracks: list[AudioTrack]
     subtitle_tracks: list
@@ -206,6 +86,9 @@ class MediaContainer:
         self.chat_visualize = True
         self.start_time = 0
 
+        is_h264 = False
+        is_h265 = False
+
         if len(av_container.streams.video) == 0:
             self.video_stream = None
             streams = av_container.streams.audio
@@ -215,6 +98,11 @@ class MediaContainer:
             streams = [self.video_stream] + list(av_container.streams.audio)
             if self.video_stream.start_time is not None:
                 self.start_time = self.video_stream.start_time * self.video_stream.time_base
+
+            if self.video_stream.codec_context.name == 'hevc':
+                is_h265 = True
+            if self.video_stream.codec_context.name == 'h264':
+                is_h264 = True
 
         self.audio_tracks = []
         stream_index_to_audio_track = {}
@@ -237,37 +125,44 @@ class MediaContainer:
 
         self.gop_start_times_dts = []
         self.gop_end_times_dts = []
+        self.gop_start_nal_types = []
         last_seen_video_dts = -1
 
         for packet in av_container.demux(streams):
             if packet.pts is None:
                 continue
             est_eof_time = max(est_eof_time, (packet.pts + packet.duration) * packet.time_base)
-            if packet.stream.type == 'video':
+            if packet.stream.type == 'video' and self.video_stream:
+
                 if packet.is_keyframe:
+                    nal_type = None
+                    if is_h265:
+                        nal_type = get_h265_nal_unit_type(bytes(packet))
+                    elif is_h264:
+                        nal_type = get_h264_nal_unit_type(bytes(packet))
+
                     # Always allow the first keyframe regardless of NAL type (may be SEI, parameter sets, etc.)
                     is_safe_keyframe = True
                     if first_keyframe:
                         first_keyframe = False  # Only apply to the very first keyframe
                     else:
-                        # For H.265, filter out CRA frames (NAL type 21) as they're not safe cut points
-                        if self.video_stream and self.video_stream.codec_context.name == 'hevc':
-                            nal_type = get_h265_nal_unit_type(bytes(packet))
-                            if nal_type is not None:
-                                if nal_type not in [16, 17, 18, 19, 20]:  # 16-18: BLA frames, 19-20: IDR frames - safe for cutting
-                                    is_safe_keyframe = False
-                                    # print(f"Found non IDR keyframe {nal_type}")
+                        # For H.265, accept BLA(16,17,18), IDR(19,20), and CRA(21) frames as keyframes
+                        # CRA frames will be converted to BLA during cutting for safety
+                        if is_h265 and nal_type is not None:
+                            # Note: Parameter sets (32,33,34) are not ideal GOP boundaries but better than nothing
+                            if nal_type not in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
+                                is_safe_keyframe = False
                         # For H.264, filter out non-IDR I-frames (NAL type 1) as they're not safe cut points
-                        elif self.video_stream and self.video_stream.codec_context.name == 'h264':
-                            nal_type = get_h264_nal_unit_type(bytes(packet))
-                            if nal_type is not None:
-                                if nal_type != 5:  # Only NAL type 5 (IDR frames) are safe for cutting
-                                    is_safe_keyframe = False
-                                    # print(f"Found non-IDR H.264 keyframe (NAL type {nal_type})")
+                        elif is_h264 and nal_type is not None:
+                            if nal_type != 5:  # Only NAL type 5 (IDR frames) are safe for cutting
+                                is_safe_keyframe = False
+                                # print(f"Found non-IDR H.264 keyframe (NAL type {nal_type})")
                     if is_safe_keyframe:
                         video_keyframe_indices.append(len(frame_pts))
                         dts = packet.dts if packet.dts is not None else -100_000_000
                         self.gop_start_times_dts.append(dts)
+                        self.gop_start_nal_types.append(nal_type)
+
                         if last_seen_video_dts > 0:
                             self.gop_end_times_dts.append(last_seen_video_dts)
                 last_seen_video_dts = packet.dts
@@ -291,6 +186,9 @@ class MediaContainer:
 
             self.gop_start_times_pts_s = list(self.video_frame_times[video_keyframe_indices])
 
+            # Post-process: Fill in actual picture NAL types for HEVC parameter sets
+            self._fill_hevc_picture_nal_types()
+
         for t in self.audio_tracks:
             frame_times = np.array(t.frame_times)
             t.frame_times = frame_times * t.av_stream.time_base
@@ -300,6 +198,67 @@ class MediaContainer:
 
     def duration(self):
         return self.eof_time - self.start_time
+
+    def _fill_hevc_picture_nal_types(self):
+        """
+        Post-process to fill in actual picture NAL types for HEVC GOPs that start with parameter sets.
+        This does a second pass to look ahead after parameter sets to find the actual picture frames.
+        """
+        if not self.video_stream or self.video_stream.codec_context.name != 'hevc':
+            return
+
+        # Find indices that need to be filled (-1 placeholders)
+        indices_to_fill = [i for i, nal_type in enumerate(self.gop_start_nal_types) if nal_type == -1]
+
+        if not indices_to_fill:
+            return  # Nothing to fill
+
+        # Open a new container for the second pass
+        av_container = av.open(self.path, 'r', metadata_errors='ignore')
+        video_stream = av_container.streams.video[0]
+
+        try:
+            # Process sequentially through all keyframes, not just the target ones
+            keyframe_index = 0
+            indices_to_fill_set = set(indices_to_fill)
+            looking_for_picture = False
+            found_keyframes = 0
+            found_pictures = 0
+
+            for packet in av_container.demux(video_stream):
+                if packet.pts is None or packet.stream.type != 'video':
+                    continue
+
+                # Check if this is a keyframe
+                if packet.is_keyframe:
+                    # Check if this keyframe corresponds to one we need to process
+                    if keyframe_index in indices_to_fill_set:
+                        # This is a parameter set keyframe that needs look-ahead
+                        looking_for_picture = True
+                        found_keyframes += 1
+                    keyframe_index += 1
+                    continue
+
+                # If we're looking for a picture frame and found one
+                if looking_for_picture and packet.stream.type == 'video':
+                    nal_type = get_h265_nal_unit_type(bytes(packet))
+                    if nal_type is not None and nal_type <= 21:  # All picture frames (0-21)
+                        # Found the picture frame, record its NAL type
+                        # Find which index in indices_to_fill this corresponds to
+                        current_keyframe_idx = keyframe_index - 1  # We just processed this keyframe
+                        if current_keyframe_idx in indices_to_fill_set:
+                            # Find position in indices_to_fill list
+                            list_position = indices_to_fill.index(current_keyframe_idx)
+                            self.gop_start_nal_types[current_keyframe_idx] = nal_type
+                            found_pictures += 1
+
+                        looking_for_picture = False
+
+                        if found_pictures >= len(indices_to_fill):
+                            break  # All done
+
+        finally:
+            av_container.close()
 
     def close(self):
         for c in self.av_containers:

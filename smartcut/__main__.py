@@ -11,7 +11,7 @@ def time_to_fraction(time_str_elem):
         is_negative = time_str_elem.startswith('-')
         if is_negative:
             time_str_elem = time_str_elem[1:]  # Remove the negative sign
-            
+
         parts = time_str_elem.split(':')
         if len(parts) == 3:
             hours = int(parts[0])
@@ -24,7 +24,7 @@ def time_to_fraction(time_str_elem):
             result = Fraction(minutes * 60) + seconds
         else:
             raise ValueError("Timestamp must be in format HH:MM:SS or MM:SS")
-            
+
         return -result if is_negative else result
 
     return Fraction(time_str_elem)
@@ -32,32 +32,32 @@ def time_to_fraction(time_str_elem):
 def resolve_time_with_duration(time_str_elem, duration):
     """
     Resolve a time string element, handling special keywords and negative times.
-    
+
     Args:
         time_str_elem: Time string (numeric, MM:SS, HH:MM:SS, or special keyword)
         duration: Media duration in seconds (Fraction)
-    
+
     Returns:
         Fraction representing absolute time in seconds
     """
     # Handle special keywords
     time_lower = time_str_elem.lower()
-    
+
     # Start of file keywords
     if time_lower in ['s', 'start']:
         return Fraction(0)
-    
-    # End of file keywords  
+
+    # End of file keywords
     if time_lower in ['e', 'end', '-0']:
         return duration
-    
+
     # Parse as regular time
     parsed_time = time_to_fraction(time_str_elem)
-    
+
     # Handle negative times (seconds from end)
     if parsed_time < 0:
         return duration + parsed_time  # duration - abs(parsed_time)
-    
+
     return parsed_time
 
 def parse_time_segments(time_str):
@@ -110,29 +110,29 @@ class Progress:
 def preprocess_argv_for_negative_numbers(argv):
     """
     Preprocess sys.argv to handle negative numbers in -k/--keep and -c/--cut arguments.
-    
+
     This works around argparse limitation where it treats arguments starting with '-'
     as option flags rather than values.
-    
+
     Args:
         argv: Command line arguments (typically sys.argv)
-        
+
     Returns:
         Processed argv list where negative values are temporarily marked
     """
     processed = []
     i = 0
-    
+
     while i < len(argv):
         if argv[i] in ['-k', '--keep', '-c', '--cut']:
             # This is one of our options that might take negative values
             processed.append(argv[i])
-            
+
             # Check if there's a next argument and it's the value (not another option)
-            if (i + 1 < len(argv) and 
-                not argv[i + 1].startswith('--') and 
+            if (i + 1 < len(argv) and
+                not argv[i + 1].startswith('--') and
                 argv[i + 1] not in ['-h', '--help', '--frames', '--version']):
-                
+
                 next_arg = argv[i + 1]
                 # If it starts with '-' but not '--', it's likely a negative value
                 if next_arg.startswith('-') and not next_arg.startswith('--'):
@@ -146,24 +146,25 @@ def preprocess_argv_for_negative_numbers(argv):
         else:
             processed.append(argv[i])
             i += 1
-            
+
     return processed
 
 def restore_negative_numbers(args):
     """
     Restore negative signs to keep/cut arguments that were marked during preprocessing.
-    
+
     Args:
         args: Parsed arguments from argparse
-        
+
     Returns:
         None (modifies args in place)
     """
     if args.keep and args.keep.startswith('NEG_MARK_'):
         args.keep = '-' + args.keep[9:]  # Remove 'NEG_MARK_' and restore '-'
-        
+
     if args.cut and args.cut.startswith('NEG_MARK_'):
         args.cut = '-' + args.cut[9:]   # Remove 'NEG_MARK_' and restore '-'
+
 
 def main():
     description = (
@@ -235,7 +236,7 @@ time formats:
     import sys
     processed_argv = preprocess_argv_for_negative_numbers(sys.argv[1:])
     args = parser.parse_args(processed_argv)
-    
+
     # Restore negative signs that were marked during preprocessing
     restore_negative_numbers(args)
 

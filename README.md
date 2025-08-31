@@ -195,6 +195,11 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.3.1
+* Fix a critical issue in h265 smartcutting that caused a lot of memory usage when cutting specific types of h265 streams
+* Better h265 gop detection
+* Added h265 CRA to BLA conversion
+
 ### 1.3
 * Update to PyAV 15.0
 * Fixed some critical issues in h264 and h265 smartcutting

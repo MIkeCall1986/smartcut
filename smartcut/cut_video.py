@@ -12,6 +12,7 @@ import av.container
 import numpy as np
 
 from smartcut.media_container import MediaContainer
+from smartcut.nal_tools import convert_hevc_cra_to_bla
 
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, MixInfo, VideoTransform, VideoViewTransform, WatermarkView
 
@@ -57,7 +58,7 @@ def make_cut_segments(media_container: MediaContainer,
 
     source_cutpoints = media_container.gop_start_times_pts_s + [media_container.eof_time]
     p = 0
-    for (i, o, i_dts, o_dts) in zip(source_cutpoints[:-1], source_cutpoints[1:], media_container.gop_start_times_dts, media_container.gop_end_times_dts):
+    for gop_idx, (i, o, i_dts, o_dts) in enumerate(zip(source_cutpoints[:-1], source_cutpoints[1:], media_container.gop_start_times_dts, media_container.gop_end_times_dts)):
         while p < len(positive_segments) and positive_segments[p][1] <= i:
             p += 1
 
@@ -65,16 +66,16 @@ def make_cut_segments(media_container: MediaContainer,
         if p == len(positive_segments) or o <= positive_segments[p][0]:
             pass
         elif keyframe_mode or (i >= positive_segments[p][0] and o <= positive_segments[p][1]):
-            cut_segments.append(CutSegment(False, i, o, i_dts, o_dts))
+            cut_segments.append(CutSegment(False, i, o, i_dts, o_dts, gop_idx))
         else:
             if i > positive_segments[p][0]:
-                cut_segments.append(CutSegment(True, i, positive_segments[p][1], i_dts, o_dts))
+                cut_segments.append(CutSegment(True, i, positive_segments[p][1], i_dts, o_dts, gop_idx))
                 p += 1
             while p < len(positive_segments) and positive_segments[p][1] < o:
-                cut_segments.append(CutSegment(True, positive_segments[p][0], positive_segments[p][1], i_dts, o_dts))
+                cut_segments.append(CutSegment(True, positive_segments[p][0], positive_segments[p][1], i_dts, o_dts, gop_idx))
                 p += 1
             if p < len(positive_segments) and positive_segments[p][0] < o:
-                cut_segments.append(CutSegment(True, positive_segments[p][0], o, i_dts, o_dts))
+                cut_segments.append(CutSegment(True, positive_segments[p][0], o, i_dts, o_dts, gop_idx))
 
     return cut_segments
 
@@ -277,6 +278,10 @@ class VideoCutter:
 
         self.segment_start_in_output = 0
 
+        # Track stream continuity for CRA to BLA conversion
+        self.last_remuxed_segment_gop_index = None
+        self.is_first_remuxed_segment = True
+
     def init_encoder(self):
         self.encoder_inited = True
         # v_codec = self.in_stream.codec_context
@@ -423,6 +428,9 @@ class VideoCutter:
         else:
             packets = self.flush_encoder()
             packets.extend(self.remux_segment(cut_segment))
+            # Update tracking variables for CRA to BLA conversion
+            self.last_remuxed_segment_gop_index = cut_segment.gop_index
+            self.is_first_remuxed_segment = False
 
         self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
 
@@ -542,11 +550,35 @@ class VideoCutter:
         result_packets = []
         segment_start_pts = int(s.start_time / self.in_stream.time_base)
 
+        # Check if we need CRA to BLA conversion for this segment
+        should_convert_cra = self._should_convert_cra_for_segment(s)
+        first_packet = True
+
         packet, demux_iter = self.fetch_packet(s.gop_start_dts)
         if packet is None:
             return []
         for packet in itertools.chain([packet], demux_iter):
             last_packet = packet.dts == s.gop_end_dts
+
+            # Apply CRA to BLA conversion only to the first packet if needed
+            if first_packet and should_convert_cra:
+                converted_data = convert_hevc_cra_to_bla(bytes(packet))
+                if converted_data != bytes(packet):
+                    # Create new packet with converted data using same pattern as copy_packet
+                    new_packet = av.Packet(converted_data)
+                    new_packet.pts = packet.pts
+                    new_packet.dts = packet.dts
+                    new_packet.duration = packet.duration
+                    new_packet.time_base = packet.time_base
+                    new_packet.stream = packet.stream
+                    new_packet.is_keyframe = packet.is_keyframe
+                    packet = new_packet
+
+            # Mark that we've processed the first packet
+            if first_packet:
+                first_packet = False
+
+            # Apply timing adjustments
             packet.pts -= segment_start_pts
             packet.pts = packet.pts * self.in_stream.time_base / self.out_time_base
             packet.pts += self.segment_start_in_output / self.out_time_base
@@ -564,6 +596,68 @@ class VideoCutter:
 
         self.remux_bitstream_filter.flush()
         return result_packets
+
+    def _should_convert_cra_for_segment(self, s: CutSegment) -> bool:
+        """
+        Check if this segment needs CRA to BLA conversion.
+        This is needed when:
+        1. The stream is HEVC
+        2. The GOP starts with a CRA frame (NAL type 21)
+        3. The stream was cut before this point. Meaning, we had discontinuity in the remux sequence right before this point.
+          Examples:
+            beginning was skipped: -k 8,12. Current segment is the first segment without recoding (e.g. starting at 8.5 with a little bit of recoding before this).
+            discontinuity in the stream: -c 20,30. Current segment is the first segment without recoding after the cut that happened at 30.
+        """
+        # Check 1: Must be HEVC
+        if self.in_stream.codec_context.name != 'hevc':
+            return False
+
+        # Check 2: GOP must start with CRA (NAL type 21)
+        if s.gop_index >= 0 and s.gop_index < len(self.media_container.gop_start_nal_types):
+            nal_type = self.media_container.gop_start_nal_types[s.gop_index]
+            if nal_type != 21:  # Not a CRA frame
+                return False
+        else:
+            return False  # Invalid GOP index
+
+        # Check 3: Check for discontinuity (missing stream content)
+        # Case 1: First segment doesn't start at beginning (content was skipped)
+        if self.is_first_remuxed_segment and s.gop_index >0:
+            return True
+
+        # Case 2: Gap between current segment and previous segment (content was cut)
+        if self.last_remuxed_segment_gop_index is not None:
+            if s.gop_index > self.last_remuxed_segment_gop_index + 1:
+                return True
+
+        return False
+
+    def _apply_cra_to_bla_conversion(self, packets: list[av.Packet]) -> list[av.Packet]:
+        """
+        Apply CRA to BLA conversion to the packet list.
+        This modifies the packet data to convert CRA frames to BLA frames.
+        """
+
+        converted_packets = []
+        for packet in packets:
+            if packet.stream.type == 'video':
+                # Convert the packet data
+                converted_data = convert_hevc_cra_to_bla(bytes(packet))
+                if converted_data != bytes(packet):
+                    # Create a new packet with converted data
+                    new_packet = av.Packet(converted_data)
+                    # Copy all attributes from original packet
+                    new_packet.stream = packet.stream
+                    new_packet.pts = packet.pts
+                    new_packet.dts = packet.dts
+                    new_packet.time_base = packet.time_base
+                    converted_packets.append(new_packet)
+                else:
+                    converted_packets.append(packet)
+            else:
+                converted_packets.append(packet)
+
+        return converted_packets
 
     def flush_encoder(self):
         if self.enc_codec is None:
