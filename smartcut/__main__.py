@@ -230,7 +230,7 @@ time formats:
     parser.add_argument('--log-level', choices=['warning', 'error', 'fatal'],
                        default='warning', metavar='LEVEL',
                        help="Set logging verbosity level (default: %(default)s)")
-    parser.add_argument('--version', action='version', version='Smartcut 1.3.0')
+    parser.add_argument('--version', action='version', version='Smartcut 1.3.1')
 
     # Preprocess argv to handle negative numbers in -k/-c arguments
     import sys
