@@ -152,9 +152,10 @@ class MediaContainer:
                             # Note: Parameter sets (32,33,34) are not ideal GOP boundaries but better than nothing
                             if nal_type not in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
                                 is_safe_keyframe = False
-                        # For H.264, filter out non-IDR I-frames (NAL type 1) as they're not safe cut points
+                        # For H.264, accept IDR frames (5) and parameter sets (7,8) as cutting points
                         elif is_h264 and nal_type is not None:
-                            if nal_type != 5:  # Only NAL type 5 (IDR frames) are safe for cutting
+                            # NAL types: 5=IDR (best), 7=SPS, 8=PPS (parameter sets - acceptable when no IDR)
+                            if nal_type not in [5, 7, 8]:
                                 is_safe_keyframe = False
                                 # print(f"Found non-IDR H.264 keyframe (NAL type {nal_type})")
                     if is_safe_keyframe:

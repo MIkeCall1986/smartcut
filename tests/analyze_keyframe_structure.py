@@ -105,7 +105,8 @@ def analyze_keyframes_structure(input_path):
                     if nal_type is not None and nal_type in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
                         is_picture_keyframe = True
                 elif ctx.name == 'h264':
-                    if nal_type is not None and nal_type == 5:
+                    # Accept IDR frames (5) and parameter sets (7,8) as cutting points
+                    if nal_type is not None and nal_type in [5, 7, 8]:
                         is_picture_keyframe = True
 
                 if is_picture_keyframe:
@@ -119,7 +120,8 @@ def analyze_keyframes_structure(input_path):
                             if nal_type not in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
                                 is_valid_gop = False
                         elif ctx.name == 'h264':
-                            if nal_type != 5:
+                            # NAL types: 5=IDR (best), 7=SPS, 8=PPS (parameter sets - acceptable when no IDR)
+                            if nal_type not in [5, 7, 8]:
                                 is_valid_gop = False
 
                     if is_valid_gop:
