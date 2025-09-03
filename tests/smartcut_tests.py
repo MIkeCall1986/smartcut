@@ -502,9 +502,8 @@ def test_peaks_mkv_memory_usage():
     monitor.start()
 
     try:
-        # Test cutting a 5-second segment
         output_path = test_peaks_mkv_memory_usage.__name__ + '.mp4'
-        segments = [(Fraction(0), Fraction(15))]
+        segments = [(Fraction(0), Fraction(5))]
 
         container = MediaContainer(peaks_path)
         audio_settings = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
@@ -531,9 +530,9 @@ def test_peaks_mkv_memory_usage():
         if os.path.exists(output_path):
             os.remove(output_path)
 
-    # Memory usage check - should not exceed 1GB
+    # Memory usage check - should not exceed 700MB
     memory_increase = peak_memory - initial_memory
-    max_allowed_memory = 1024 * 1024 * 1024  # 1GB
+    max_allowed_memory = 700 * 1024 * 1024
 
     print(f"Peak memory increase: {memory_increase / (1024*1024):.1f} MB")
     assert memory_increase < max_allowed_memory, f"Memory usage too high: {memory_increase / (1024*1024):.1f} MB"

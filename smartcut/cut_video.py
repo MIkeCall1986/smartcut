@@ -1,5 +1,6 @@
 from enum import Enum
 from fractions import Fraction
+import heapq
 
 from math import e
 import os
@@ -22,6 +23,18 @@ except ImportError:
 
 class CancelObject:
     cancelled: bool = False
+
+@dataclass
+class FrameHeapItem:
+    """Wrapper for frames in the heap, sorted by PTS"""
+    pts: int
+    frame: 'av.VideoFrame'
+
+    def __lt__(self, other):
+        # Handle None PTS values by treating them as -1 (earliest)
+        self_pts = self.pts if self.pts is not None else -1
+        other_pts = other.pts if other.pts is not None else -1
+        return self_pts < other_pts
 
 def is_annexb(packet):
         data = bytes(packet)
@@ -217,8 +230,11 @@ class VideoCutter:
 
         self.demux_iter = self.input_av_container.demux(self.in_stream)
         self.demux_saved_packet = None
-        self.frame_cache = []
-        self.frame_cache_start_dts = -1
+
+        # Frame buffering for fetch_frame (using heap for efficient PTS ordering)
+        self.frame_buffer = []
+        self.frame_buffer_gop_dts = -1
+        self.decoder = self.in_stream.codec_context
 
         if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
             self.out_stream = output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'})
@@ -495,21 +511,7 @@ class VideoCutter:
             self.enc_last_pts = -1
             self.enc_codec = enc_codec
 
-        if self.frame_cache_start_dts != s.gop_start_dts:
-            self.frame_cache.clear()
-            self.frame_cache_start_dts = s.gop_start_dts
-            decoder = self.in_stream.codec_context
-            decoder.flush_buffers()
-
-            for packet in self.fetch_packet(s.gop_start_dts, s.gop_end_dts):
-                for frame in decoder.decode(packet):
-                    self.frame_cache.append(frame)
-            for frame in decoder.decode(None):
-                self.frame_cache.append(frame)
-
-            self.frame_cache.sort(key=lambda x: x.pts)
-
-        for frame in self.frame_cache:
+        for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time):
             in_tb = frame.time_base if frame.time_base is not None else self.in_stream.time_base
             if frame.pts * in_tb < s.start_time:
                 continue
@@ -702,6 +704,69 @@ class VideoCutter:
 
             # Packet is in our target range, yield it
             yield packet
+
+    def fetch_frame(self, gop_start_dts, gop_end_dts, end_time):
+        # Initialize or reset for new GOP
+        if self.frame_buffer_gop_dts != gop_start_dts:
+            self.frame_buffer = []
+            self.frame_buffer_gop_dts = gop_start_dts
+            self.decoder.flush_buffers()
+
+        # Get time_base for PTS calculations
+        time_base = self.in_stream.time_base
+
+        # Process packets and yield frames when safe
+        current_dts = gop_start_dts
+
+        for packet in self.fetch_packet(gop_start_dts, gop_end_dts):
+            current_dts = packet.dts if packet.dts is not None else current_dts
+
+            # Decode packet and add frames to buffer
+            for frame in self.decoder.decode(packet):
+                heap_item = FrameHeapItem(frame.pts, frame)
+                heapq.heappush(self.frame_buffer, heap_item)
+
+            # Release frames that are safe (buffer_lowest_pts <= current_dts)
+            while len(self.frame_buffer) > 1:  # Keep at least one frame for ordering
+                lowest_heap_item = self.frame_buffer[0]  # Peek at heap minimum
+                frame = lowest_heap_item.frame
+                frame_pts = lowest_heap_item.pts if lowest_heap_item.pts is not None else -1
+                frame_time_base = frame.time_base if frame.time_base is not None else time_base
+
+                # Only process frames that are safe to release (frame_pts <= current_dts)
+                if frame_pts <= current_dts:
+                    if frame_pts * frame_time_base < end_time:
+                        heapq.heappop(self.frame_buffer)  # Remove from heap
+                        yield frame
+                    else:
+                        # Safe frame is beyond end_time - we're done since all frames from now would be beyond end time
+                        return
+                else:
+                    break
+
+        # Final flush of the decoder
+        try:
+            for frame in self.decoder.decode(None):
+                heap_item = FrameHeapItem(frame.pts, frame)
+                heapq.heappush(self.frame_buffer, heap_item)
+        except:
+            pass
+
+        # Yield remaining frames within time range
+        while self.frame_buffer:
+            # Peek at the next frame without popping it
+            next_frame = self.frame_buffer[0]
+            frame = next_frame.frame
+            frame_time_base = frame.time_base if frame.time_base is not None else time_base
+
+            if (next_frame.pts is not None and
+                next_frame.pts * frame_time_base < end_time):
+                # Frame is within time range, pop and yield it
+                heapq.heappop(self.frame_buffer)
+                yield frame
+            else:
+                # Frame is outside time range, stop processing (leave it in buffer)
+                break
 
 def smart_cut(media_container: MediaContainer, positive_segments: List[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo = None, log_level = None, progress = None,
