@@ -122,12 +122,12 @@ def get_h265_nal_unit_type(packet_data):
         for nal_type in nal_types_found:
             if nal_type == 21:  # CRA frame
                 return nal_type
-        
+
         # Then check for any other picture NAL types (0-15)
         for nal_type in nal_types_found:
             if 0 <= nal_type <= 15:  # Other picture types
                 return nal_type
-        
+
         # Finally return first metadata type if no pictures found
         return nal_types_found[0]
 

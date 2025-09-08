@@ -195,6 +195,9 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.3.3
+* Another h264 NAL detection fix
+
 ### 1.3.2
 * Fix memory usage issues for good with better handling of large GoPs
 * Fix an issue with certain types of h264 streams
