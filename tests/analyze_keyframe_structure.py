@@ -7,7 +7,7 @@ Standalone tool for debugging GOP detection and keyframe analysis.
 import sys
 import os
 from pathlib import Path
-from smartcut.nal_tools import get_h265_nal_unit_type, get_h264_nal_unit_type
+from smartcut.nal_tools import get_h265_nal_unit_type, get_h264_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
 import av
 
 
@@ -98,16 +98,12 @@ def analyze_keyframes_structure(input_path):
                 if packet.is_keyframe:
                     all_keyframes.append((frame_time, nal_type_str))
 
-                # For GOP analysis, consider picture frames and parameter sets (temporary workaround)
+                # For GOP analysis, use the same safety checks as media_container
                 is_picture_keyframe = False
                 if ctx.name == 'hevc':
-                    # TEMPORARY: Include parameter sets until proper I-frame detection works
-                    if nal_type is not None and nal_type in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
-                        is_picture_keyframe = True
+                    is_picture_keyframe = is_safe_h265_keyframe_nal(nal_type)
                 elif ctx.name == 'h264':
-                    # Accept IDR frames (5) and parameter sets (7,8) as cutting points
-                    if nal_type is not None and nal_type in [5, 7, 8]:
-                        is_picture_keyframe = True
+                    is_picture_keyframe = is_safe_h264_keyframe_nal(nal_type)
 
                 if is_picture_keyframe:
                     # Check if this would be accepted as a valid GOP keyframe
@@ -115,14 +111,11 @@ def analyze_keyframes_structure(input_path):
                     if first_keyframe:
                         first_keyframe = False  # First picture keyframe is always accepted
                     else:
+                        # Use the same safety checks as media_container for consistency
                         if ctx.name == 'hevc':
-                            # TEMPORARY: Accept parameter sets as well
-                            if nal_type not in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
-                                is_valid_gop = False
+                            is_valid_gop = is_safe_h265_keyframe_nal(nal_type)
                         elif ctx.name == 'h264':
-                            # NAL types: 5=IDR (best), 7=SPS, 8=PPS (parameter sets - acceptable when no IDR)
-                            if nal_type not in [5, 7, 8]:
-                                is_valid_gop = False
+                            is_valid_gop = is_safe_h264_keyframe_nal(nal_type)
 
                     if is_valid_gop:
                         valid_gop_keyframes.append((frame_time, nal_type_str))

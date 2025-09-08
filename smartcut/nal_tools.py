@@ -60,14 +60,16 @@ def convert_hevc_cra_to_bla(packet_data):
 def get_h265_nal_unit_type(packet_data):
     """
     Extract NAL unit type from H.265/HEVC packet data.
-    For packets with multiple NAL units, returns safe IDR/BLA type if found,
-    otherwise returns the first NAL unit type.
+    For packets with multiple NAL units, prioritizes picture NAL types (0-21)
+    over metadata types (32-40). Returns safe keyframes first (16-20), then
+    other picture types, then metadata.
 
     H.265 NAL unit types:
+    - 0-21: Picture NAL types (actual video data, priority over metadata)
     - 16-18: BLA frames (safe cut points)
     - 19, 20: IDR frames (safe cut points)
     - 21: CRA frame (not safe for cutting due to RASL pictures)
-    - 32, 33, 34: VPS, SPS, PPS (parameter sets)
+    - 32-34: VPS, SPS, PPS (parameter sets)
     - 35: AUD (Access Unit Delimiter)
     """
     if not packet_data or len(packet_data) < 6:
@@ -114,21 +116,65 @@ def get_h265_nal_unit_type(packet_data):
         else:
             i += 1
 
-    # No safe keyframe found, return first NAL type if any were found
+    # No safe keyframes found, prioritize picture types (0-21) over metadata (32-40)
     if nal_types_found:
+        # First check for CRA frames (21) - these are picture types but need special handling
+        for nal_type in nal_types_found:
+            if nal_type == 21:  # CRA frame
+                return nal_type
+        
+        # Then check for any other picture NAL types (0-15)
+        for nal_type in nal_types_found:
+            if 0 <= nal_type <= 15:  # Other picture types
+                return nal_type
+        
+        # Finally return first metadata type if no pictures found
         return nal_types_found[0]
 
     return None
 
+
+def is_safe_h264_keyframe_nal(nal_type):
+    """
+    Check if an H.264 NAL type represents a safe keyframe for cutting.
+
+    Args:
+        nal_type: H.264 NAL unit type (int)
+
+    Returns:
+        bool: True if this NAL type is safe for cutting
+    """
+    if nal_type is None:
+        return True # Can't know for sure
+    # Accept IDR frames (5), SEI (6), and parameter sets (7,8) as cutting points
+    return nal_type in [5, 6, 7, 8]
+
+
+def is_safe_h265_keyframe_nal(nal_type):
+    """
+    Check if an H.265 NAL type represents a safe keyframe for cutting.
+
+    Args:
+        nal_type: H.265 NAL unit type (int)
+
+    Returns:
+        bool: True if this NAL type is safe for cutting
+    """
+    if nal_type is None:
+        return True  # Can't know for sure
+    # Accept BLA(16,17,18), IDR(19,20), CRA(21) frames and parameter sets (32,33,34)
+    return nal_type in [16, 17, 18, 19, 20, 21, 32, 33, 34]
+
 def get_h264_nal_unit_type(packet_data):
     """
     Extract NAL unit type from H.264/AVC packet data.
-    For packets with multiple NAL units, returns type 5 (IDR) if found,
-    otherwise returns the first NAL unit type.
+    For packets with multiple NAL units, prioritizes picture NAL types (1-5)
+    over metadata types (6-9). Returns type 5 (IDR) if found, otherwise
+    returns the most important picture type, or first metadata type if no pictures.
 
     H.264 NAL unit types:
     - 5: IDR frame (safe cut point)
-    - 1: Non-IDR slice (not safe for cutting if it's an I-frame)
+    - 1-4: Non-IDR slices (picture data, priority over metadata)
     - 7, 8: SPS, PPS (parameter sets)
     - 9: AUD (Access Unit Delimiter)
     """
@@ -151,7 +197,7 @@ def get_h264_nal_unit_type(packet_data):
             nal_unit_type = nal_header & 0x1F  # H.264 uses lower 5 bits
             return nal_unit_type
 
-    # Try Annex B format (start codes) - search entire packet for IDR frames
+    # Try Annex B format (start codes) - search for best NAL type
     nal_types_found = []
     i = 0
     while i < len(data) - 4:
@@ -160,7 +206,7 @@ def get_h264_nal_unit_type(packet_data):
                 nal_header = data[i+4]
                 nal_type = nal_header & 0x1F
                 nal_types_found.append(nal_type)
-                if nal_type == 5:  # Found IDR frame - this is what we want!
+                if nal_type == 5:  # Found IDR frame - highest priority!
                     return 5
             i += 4
         elif data[i:i+3] == b'\x00\x00\x01':
@@ -168,14 +214,19 @@ def get_h264_nal_unit_type(packet_data):
                 nal_header = data[i+3]
                 nal_type = nal_header & 0x1F
                 nal_types_found.append(nal_type)
-                if nal_type == 5:  # Found IDR frame - this is what we want!
+                if nal_type == 5:  # Found IDR frame - highest priority!
                     return 5
             i += 3
         else:
             i += 1
 
-    # No IDR frame found, return first NAL type if any were found
+    # No IDR found, prioritize picture types (1-4) over metadata types (6-9)
     if nal_types_found:
+        # Look for any picture NAL types first
+        for nal_type in nal_types_found:
+            if 1 <= nal_type <= 4:  # Non-IDR picture types
+                return nal_type
+        # If no picture types, return first metadata type
         return nal_types_found[0]
 
     return None

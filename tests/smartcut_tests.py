@@ -337,6 +337,9 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
             source_decoder = source_av.decode(video=0)
             result_decoder = result_av.decode(video=0)
 
+            print(source_container.path)
+            print(result_container.path)
+
             for source_frame, result_frame in zip(source_decoder, result_decoder):
                 frame_time = source_frame.pts * source_frame.time_base
                 if frame_time < start_time:
@@ -1578,28 +1581,15 @@ def test_h264_non_idr_keyframes_annexb():
 
     output_filename = 'h264_non_idr_annexb_test.ts'
 
-    try:
-        smart_cut(source, segments, output_filename,
-                 audio_export_info=audio_export_info,
-                 video_settings=video_settings,
-                 log_level='info')
+    smart_cut(source, segments, output_filename,
+                audio_export_info=audio_export_info,
+                video_settings=video_settings,
+                log_level='info')
 
-        result = MediaContainer(output_filename)
+    result = MediaContainer(output_filename)
 
-        # Test video playback - this should work after NAL filtering is implemented
-        check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
-
-        result.close()
-    except av.error.InvalidDataError as e:
-        if "no frame" in str(e):
-            # This error indicates the H.264 NAL filtering fix is needed for Annex B format too
-            raise AssertionError("H.264 reference frame error detected!") from e
-        else:
-            raise
-    finally:
-        source.close()
-        if os.path.exists(output_filename):
-            os.remove(output_filename)
+    # Test video playback - this should work after NAL filtering is implemented
+    check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
 
 def test_testvideos_bigbuckbunny_h264():
     """Test with test-videos.co.uk Big Buck Bunny H.264"""

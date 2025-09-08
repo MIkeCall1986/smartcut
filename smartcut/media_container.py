@@ -6,7 +6,7 @@ import av.stream
 import av.video
 import numpy as np
 
-from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type
+from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
 
 def ts_to_time(ts):
     return Fraction(round(ts*1000), 1000)
@@ -70,7 +70,7 @@ class MediaContainer:
     chat_cumsum: np.ndarray | None
     chat_visualize: bool
 
-    def __init__(self, path) -> None:
+    def __init__(self, path, progress_callback=None) -> None:
         self.path = path
 
         frame_pts = []
@@ -128,6 +128,10 @@ class MediaContainer:
         self.gop_start_nal_types = []
         last_seen_video_dts = -1
 
+        # Progress tracking for demux loop
+        packet_count = 0
+        progress_report_interval = 1000  # Report progress every 1000 packets
+
         for packet in av_container.demux(streams):
             if packet.pts is None:
                 continue
@@ -146,18 +150,11 @@ class MediaContainer:
                     if first_keyframe:
                         first_keyframe = False  # Only apply to the very first keyframe
                     else:
-                        # For H.265, accept BLA(16,17,18), IDR(19,20), and CRA(21) frames as keyframes
-                        # CRA frames will be converted to BLA during cutting for safety
-                        if is_h265 and nal_type is not None:
-                            # Note: Parameter sets (32,33,34) are not ideal GOP boundaries but better than nothing
-                            if nal_type not in [16, 17, 18, 19, 20, 21, 32, 33, 34]:
-                                is_safe_keyframe = False
-                        # For H.264, accept IDR frames (5) and parameter sets (7,8) as cutting points
-                        elif is_h264 and nal_type is not None:
-                            # NAL types: 5=IDR (best), 7=SPS, 8=PPS (parameter sets - acceptable when no IDR)
-                            if nal_type not in [5, 7, 8]:
-                                is_safe_keyframe = False
-                                # print(f"Found non-IDR H.264 keyframe (NAL type {nal_type})")
+                        # Use centralized helper functions for NAL type safety checks
+                        if is_h265:
+                            is_safe_keyframe = is_safe_h265_keyframe_nal(nal_type)
+                        elif is_h264:
+                            is_safe_keyframe = is_safe_h264_keyframe_nal(nal_type)
                     if is_safe_keyframe:
                         video_keyframe_indices.append(len(frame_pts))
                         dts = packet.dts if packet.dts is not None else -100_000_000
@@ -177,6 +174,15 @@ class MediaContainer:
                 track.frame_times.append(packet.pts)
             elif packet.stream.type == 'subtitle':
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
+
+            # Report progress periodically during demux
+            packet_count += 1
+            if progress_callback and packet_count % progress_report_interval == 0:
+                # We can't know total packets in advance, so report based on time processed
+                time_processed = float(est_eof_time) if est_eof_time > 0 else 0
+                # Estimate progress as a percentage (this is approximate)
+                if time_processed > 0:
+                    progress_callback(int(min(90, time_processed * 10)), 100)  # Cap at 90% during demux
 
         # Adding 1ms of extra to make sure we include the last frame in the output
         self.eof_time = est_eof_time + Fraction(1, 1000)
