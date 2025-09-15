@@ -316,7 +316,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
                 if frame_failed:
                     failed_frames += 1
 
-def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0, duration=None, pixel_tolerance=20):
+def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0.0, duration=None, pixel_tolerance=20):
     """Fast pixel testing of small video segments instead of entire video"""
     if duration is None:
         duration = min(10, float(source_container.duration()))  # Test max 10 seconds
@@ -1492,28 +1492,80 @@ def test_h264_non_idr_keyframes():
 
     output_filename = 'h264_non_idr_minimal_test.mp4'
 
-    try:
-        smart_cut(source, segments, output_filename,
-                 audio_export_info=audio_export_info,
-                 video_settings=video_settings,
-                 log_level='info')
+    smart_cut(source, segments, output_filename,
+                audio_export_info=audio_export_info,
+                video_settings=video_settings,
+                log_level='info')
 
-        result = MediaContainer(output_filename)
+    result = MediaContainer(output_filename)
 
-        # Test video playback - this should work after NAL filtering is implemented
-        check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
+    # Test video playback - this should work after NAL filtering is implemented
+    check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
 
-        result.close()
-    except av.error.InvalidDataError as e:
-        if "no frame" in str(e):
-            # This error indicates the H.264 NAL filtering fix is needed
-            raise AssertionError("H.264 reference frame error detected!") from e
-        else:
-            raise
-    finally:
-        source.close()
-        if os.path.exists(output_filename):
-            os.remove(output_filename)
+def test_ts_h264_to_mp4_smart_cut():
+    """
+    Verify converting H.264 in MPEG-TS to MP4 works.
+
+    Uses a known-good H.264 stream repackaged into TS (Annex B) as input,
+    then performs smart cut to MP4 and compares against a full recode MP4
+    of the same segments to validate correctness. This exercises the
+    remux path and container conversion logic from TS -> MP4.
+    """
+    # Prepare H.264-in-TS input
+    ts_input = get_tears_of_steel_annexb()
+
+    source = MediaContainer(ts_input)
+
+    # Pick two short non-overlapping segments well inside the file
+    # to keep the test quick and stable.
+    # Tears of Steel is long enough for these constants.
+    segments = [
+        (Fraction(10, 1), Fraction(18, 1)),
+        (Fraction(30, 1), Fraction(38, 1)),
+    ]
+
+    # Passthrough all audio tracks by default
+    s = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[s] * len(source.audio_tracks))
+
+    # Output targets (force MP4 container)
+    smartcut_output = test_ts_h264_to_mp4_smart_cut.__name__ + "_smartcut.mp4"
+    recode_output = test_ts_h264_to_mp4_smart_cut.__name__ + "_recode.mp4"
+
+    # Smart cut MP4
+    smart_cut(
+        source,
+        segments,
+        smartcut_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    # Full recode MP4 for comparison
+    smart_cut(
+        source,
+        segments,
+        recode_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    # Validate MP4 container and codec
+    with av.open(smartcut_output) as c:
+        assert 'mp4' in c.format.name, f"Expected MP4 container, got {c.format.name}"
+        vstreams = [s for s in c.streams if s.type == 'video']
+        assert len(vstreams) == 1, f"Expected 1 video stream, found {len(vstreams)}"
+        assert vstreams[0].codec_context.name in ['h264', 'libx264'], \
+            f"Expected H.264 video codec, got {vstreams[0].codec_context.name}"
+
+    # Compare smart cut vs full recode outputs for equivalence
+    smartcut_container = MediaContainer(smartcut_output)
+    recode_container = MediaContainer(recode_output)
+
+    # Allow a slightly looser tolerance for real-world content
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=40)
 
 def test_h264_non_idr_keyframes_annexb():
     """
@@ -1907,6 +1959,7 @@ def get_test_categories():
             test_flv_smart_cut,
             test_mov_smart_cut,
             test_wmv_smart_cut,
+            test_ts_h264_to_mp4_smart_cut,
         ],
 
         'audio': [
