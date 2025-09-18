@@ -14,6 +14,7 @@ todo
 
 *.proj
 
+venv
 .venv
 __pycache__
 
