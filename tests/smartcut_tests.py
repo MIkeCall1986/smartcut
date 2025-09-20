@@ -1464,6 +1464,29 @@ def get_tears_of_steel_annexb():
 
     return ts_filename
 
+
+def get_testvideos_jellyfish_h265_ts():
+    """Fetch Jellyfish HEVC sample and convert it to Annex B in an MPEG-TS container."""
+    mp4_filename = cached_download(
+        'https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4',
+        'testvideos_jellyfish_h265.mp4'
+    )
+    ts_filename = 'testvideos_jellyfish_h265.ts'
+
+    if not os.path.exists(ts_filename):
+        import subprocess
+        result = subprocess.run([
+            'ffmpeg', '-i', mp4_filename,
+            '-c', 'copy',
+            '-f', 'mpegts',
+            '-y', ts_filename
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to convert HEVC sample to TS format: {result.stderr}")
+
+    return ts_filename
+
 def test_h264_non_idr_keyframes():
     """
     Test that H.264 non-IDR I-frame issues are properly handled.
@@ -1501,6 +1524,54 @@ def test_h264_non_idr_keyframes():
 
     # Test video playback - this should work after NAL filtering is implemented
     check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
+
+def test_ts_h264_to_mp4_cut_on_keyframes():
+    """
+    Verify TS -> MP4 remux works when cutting on keyframes only.
+
+    This exercises the pure passthrough path (no recoding) to ensure
+    Annex B H.264 from TS containers can be muxed into MP4 correctly.
+    """
+    ts_input = get_tears_of_steel_annexb()
+    source = MediaContainer(ts_input)
+
+    # Pick GOP-aligned segments so the cut stays in passthrough mode
+    gop_times = source.gop_start_times_pts_s
+    assert len(gop_times) > 14, "Expected Tears of Steel sample to provide enough GOPs"
+
+    segments = [
+        (Fraction(gop_times[5]), Fraction(gop_times[7])),
+        (Fraction(gop_times[12]), Fraction(gop_times[14])),
+    ]
+
+    cut_segments = make_cut_segments(source, segments, keyframe_mode=True)
+    assert all(not segment.require_recode for segment in cut_segments), "Keyframe cuts should not require recoding"
+
+    audio_settings = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
+
+    output_filename = test_ts_h264_to_mp4_cut_on_keyframes.__name__ + ".mp4"
+
+    smart_cut(
+        source,
+        segments,
+        output_filename,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.KEYFRAMES, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    with av.open(output_filename) as container:
+        assert 'mp4' in container.format.name, f"Expected MP4 container, got {container.format.name}"
+        video_streams = [stream for stream in container.streams if stream.type == 'video']
+        assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
+        assert video_streams[0].codec_context.name == 'h264', \
+            f"Expected H.264 video codec, got {video_streams[0].codec_context.name}"
+
+    result = MediaContainer(output_filename)
+    assert len(result.video_frame_times) > 0, "Remuxed output should contain video frames"
+    assert result.video_stream.codec_context.codec_tag == 'avc1', "MP4 remux should use avc1 codec tag"
+
 
 def test_ts_h264_to_mp4_smart_cut():
     """
@@ -1565,6 +1636,105 @@ def test_ts_h264_to_mp4_smart_cut():
     recode_container = MediaContainer(recode_output)
 
     # Allow a slightly looser tolerance for real-world content
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=40)
+
+
+def test_ts_h265_to_mp4_smart_cut():
+    """Verify converting H.265 in MPEG-TS to MP4 works through the smart-cut path."""
+    ts_input = get_testvideos_jellyfish_h265_ts()
+
+    source = MediaContainer(ts_input)
+
+    segments = [
+        (Fraction(0, 1), Fraction(4, 1)),
+        (Fraction(5, 1), Fraction(9, 1)),
+    ]
+
+    audio_settings = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
+
+    smartcut_output = test_ts_h265_to_mp4_smart_cut.__name__ + '_smartcut.mp4'
+    recode_output = test_ts_h265_to_mp4_smart_cut.__name__ + '_recode.mp4'
+
+    smart_cut(
+        source,
+        segments,
+        smartcut_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    smart_cut(
+        source,
+        segments,
+        recode_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    with av.open(smartcut_output) as container:
+        assert 'mp4' in container.format.name, f"Expected MP4 container, got {container.format.name}"
+        video_streams = [stream for stream in container.streams if stream.type == 'video']
+        assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
+        assert video_streams[0].codec_context.name in ['hevc', 'libx265'], \
+            f"Expected H.265 video codec, got {video_streams[0].codec_context.name}"
+
+    smartcut_container = MediaContainer(smartcut_output)
+    recode_container = MediaContainer(recode_output)
+
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=80, allow_failed_frames=2)
+
+
+def test_ts_h264_to_mkv_smart_cut():
+    """
+    Verify converting H.264 in MPEG-TS to MKV works using the smart-cut pipeline.
+
+    Mirrors the MP4 smart cut test but targets MKV to ensure remux + recode
+    coverage without interfering codec-tag logic.
+    """
+    ts_input = get_tears_of_steel_annexb()
+    source = MediaContainer(ts_input)
+
+    segments = [
+        (Fraction(10, 1), Fraction(18, 1)),
+        (Fraction(30, 1), Fraction(38, 1)),
+    ]
+
+    audio_passthru = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[audio_passthru] * len(source.audio_tracks))
+
+    smartcut_output = test_ts_h264_to_mkv_smart_cut.__name__ + "_smartcut.mkv"
+    recode_output = test_ts_h264_to_mkv_smart_cut.__name__ + "_recode.mkv"
+
+    smart_cut(
+        source,
+        segments,
+        smartcut_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    smart_cut(
+        source,
+        segments,
+        recode_output,
+        audio_export_info=audio_export_info,
+        video_settings=VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH),
+        log_level='warning'
+    )
+
+    with av.open(smartcut_output) as container:
+        assert 'matroska' in container.format.name, f"Expected MKV container, got {container.format.name}"
+        video_streams = [s for s in container.streams if s.type == 'video']
+        assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
+        assert video_streams[0].codec_context.name in ['h264', 'libx264'], \
+            f"Expected H.264 video codec, got {video_streams[0].codec_context.name}"
+
+    smartcut_container = MediaContainer(smartcut_output)
+    recode_container = MediaContainer(recode_output)
     check_videos_equal(smartcut_container, recode_container, pixel_tolerance=40)
 
 def test_h264_non_idr_keyframes_annexb():
@@ -1933,6 +2103,8 @@ def get_test_categories():
             test_h264_non_idr_keyframes_annexb,
             test_mp4_to_mkv_smart_cut,
             test_mkv_to_mp4_smart_cut,
+            test_ts_h264_to_mp4_cut_on_keyframes,
+            test_ts_h264_to_mkv_smart_cut,
         ],
 
         'h265': [
@@ -1940,6 +2112,7 @@ def get_test_categories():
             test_h265_smart_cut,
             test_mp4_h265_smart_cut,
             test_peaks_mkv_memory_usage,
+            test_ts_h265_to_mp4_smart_cut,
         ],
 
         'codecs': [
@@ -1959,7 +2132,9 @@ def get_test_categories():
             test_flv_smart_cut,
             test_mov_smart_cut,
             test_wmv_smart_cut,
+            test_ts_h264_to_mp4_cut_on_keyframes,
             test_ts_h264_to_mp4_smart_cut,
+            test_ts_h264_to_mkv_smart_cut,
         ],
 
         'audio': [

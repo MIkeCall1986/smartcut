@@ -274,6 +274,8 @@ class VideoCutter:
                     self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('hevc_mp4toannexb', self.in_stream, self.out_stream)
 
 
+        self._normalize_output_codec_tag(output_av_container)
+
         self.last_dts = -100_000_000
 
         self.segment_start_in_output = 0
@@ -281,6 +283,42 @@ class VideoCutter:
         # Track stream continuity for CRA to BLA conversion
         self.last_remuxed_segment_gop_index = None
         self.is_first_remuxed_segment = True
+
+    def _normalize_output_codec_tag(self, output_av_container: av.container.Container) -> None:
+        """Ensure codec tags are compatible with MP4/MOV style containers."""
+
+        codec_name = self.in_stream.codec_context.name
+        container_name = output_av_container.format.name.lower() if output_av_container.format.name else ''
+
+        if not any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm')):
+            return
+
+        if codec_name == 'h264':
+            if self._is_mpegts_h264_tag(self.out_stream.codec_context.codec_tag):
+                self.out_stream.codec_context.codec_tag = 'avc1'
+        elif codec_name in ('hevc', 'h265'):
+            if self._is_mpegts_hevc_tag(self.out_stream.codec_context.codec_tag):
+                self.out_stream.codec_context.codec_tag = 'hvc1'
+
+    @staticmethod
+    def _is_mpegts_h264_tag(codec_tag) -> bool:
+        if isinstance(codec_tag, int):
+            return codec_tag == 27
+        if isinstance(codec_tag, bytes):
+            return codec_tag == b'\x1b\x00\x00\x00'
+        if isinstance(codec_tag, str):
+            return codec_tag == '\x1b\x00\x00\x00'
+        return False
+
+    @staticmethod
+    def _is_mpegts_hevc_tag(codec_tag) -> bool:
+        if isinstance(codec_tag, int):
+            return codec_tag == 36
+        if isinstance(codec_tag, bytes):
+            return codec_tag in (b'HEVC', b'\x24\x00\x00\x00')
+        if isinstance(codec_tag, str):
+            return codec_tag in ('HEVC', '\x24\x00\x00\x00')
+        return False
 
     def init_encoder(self):
         self.encoder_inited = True
@@ -309,7 +347,7 @@ class VideoCutter:
 
         # Get CRF value for quality setting
         crf_value = get_crf_for_quality(self.video_settings.quality)
-        
+
         # Adjust CRF for newer codecs that are more efficient
         if self.codec_name in ['hevc', 'av1', 'vp9']:
             crf_value += 4
