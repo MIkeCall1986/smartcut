@@ -120,7 +120,6 @@ class MediaContainer:
             stream_index_to_subtitle_track[s.index] = i
             self.subtitle_tracks.append([])
 
-        video_keyframe_indices = []
         first_keyframe = True  # Always allow the first keyframe regardless of NAL type
 
         self.gop_start_times_dts = []
@@ -156,7 +155,7 @@ class MediaContainer:
                         elif is_h264:
                             is_safe_keyframe = is_safe_h264_keyframe_nal(nal_type)
                     if is_safe_keyframe:
-                        video_keyframe_indices.append(len(frame_pts))
+                        self.video_keyframe_indices.append(len(frame_pts))
                         dts = packet.dts if packet.dts is not None else -100_000_000
                         self.gop_start_times_dts.append(dts)
                         self.gop_start_nal_types.append(nal_type)
@@ -191,7 +190,7 @@ class MediaContainer:
             self.gop_end_times_dts.append(last_seen_video_dts)
             self.video_frame_times = np.sort(np.array(frame_pts)) * self.video_stream.time_base
 
-            self.gop_start_times_pts_s = list(self.video_frame_times[video_keyframe_indices])
+            self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
 
             # Post-process: Fill in actual picture NAL types for HEVC parameter sets
             self._fill_hevc_picture_nal_types()
