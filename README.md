@@ -49,10 +49,10 @@ smartcut input.mp4 output.mp4 --keep 10,20,40,50
 git clone https://github.com/skeskinen/smartcut.git
 cd smartcut
 # Create python virtual environment:
-python -m venv .venv
-source .venv/bin/activate
-# Install the required dependencies:
-pip install -r requirements.txt
+python -m venv venv
+source venv/bin/activate
+# Install the project to venv along with required dependencies:
+pip install .
 # Run:
 python ./smartcut input.mp4 output.mp4 --keep 10,20,40,50
 ```
