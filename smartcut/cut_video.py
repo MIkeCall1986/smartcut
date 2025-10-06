@@ -412,6 +412,7 @@ class VideoCutter:
 
         for packet in packets:
             packet.stream = self.out_stream
+            packet.time_base = self.out_time_base
             if packet.dts is not None:
                 if packet.dts <= self.last_dts:
                     packet.dts = self.last_dts + 1
@@ -425,6 +426,7 @@ class VideoCutter:
         packets = self.flush_encoder()
         for packet in packets:
             packet.stream = self.out_stream
+            packet.time_base = self.out_time_base
             if packet.dts is not None:
                 if packet.dts <= self.last_dts:
                     packet.dts = self.last_dts + 1
