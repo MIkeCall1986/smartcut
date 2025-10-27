@@ -1,16 +1,16 @@
 from dataclasses import dataclass, field
 from fractions import Fraction
 from itertools import chain
+from typing import cast
 
 import av
 import av.stream
 import av.video
+from av import AudioCodecContext, Packet, VideoStream, AudioResampler
 from av.packet import Packet
 from av.container import Container
 from av.container.input import InputContainer
 from av.stream import Stream
-from av.video.stream import VideoStream
-from av.audio.resampler import AudioResampler
 import numpy as np
 
 from smartcut.nal_tools import (
@@ -35,25 +35,8 @@ class AudioTrack:
     index_in_source: int = 0
 
     packets: list[Packet] = field(default_factory = lambda: [])
-    frame_times: np.array = field(default_factory = lambda: [])
+    frame_times: np.ndarray | list[int] = field(default_factory = lambda: [])
     pts_to_samples: dict = field(default_factory = lambda: {})
-
-    controls: object = None
-    error_msg: str = None
-    audio_16k: np.array = None
-
-    eof_time: Fraction = None
-    shift: float = 0.0
-    max_tree: np.array = None
-
-    level_ignoring_mute: float = None
-    muted: bool = None
-
-    def selected_for_transcript(self):
-        return self.controls is None or self.controls.transcript_button.isChecked()
-
-    def duration(self) -> Fraction:
-        return self.eof_time - self.media_container.start_time
 
     def start_time(self) -> Fraction:
         return self.media_container.start_time
@@ -65,8 +48,6 @@ class MediaContainer:
 
     eof_time: Fraction
 
-    video_stream: Stream | None
-
     video_frame_times: np.ndarray
     video_keyframe_indices: list[int]
     gop_start_times_pts_s: list[int] # Smallest pts in a GOP, in seconds
@@ -77,11 +58,6 @@ class MediaContainer:
 
     audio_tracks: list[AudioTrack]
     subtitle_tracks: list
-
-    chat_url: str | None
-    chat_history: np.ndarray | None
-    chat_cumsum: np.ndarray | None
-    chat_visualize: bool
 
     def __init__(self, path: str, progress_callback=None) -> None:
         self.path = path
@@ -102,9 +78,11 @@ class MediaContainer:
         is_h264 = False
         is_h265 = False
 
+        streams: list[Stream]
+
         if len(av_container.streams.video) == 0:
             self.video_stream = None
-            streams = av_container.streams.audio
+            streams = [*av_container.streams.audio]
         else:
             self.video_stream = av_container.streams.video[0]
             self.video_stream.thread_type = "FRAME"
@@ -120,8 +98,8 @@ class MediaContainer:
         self.audio_tracks = []
         stream_index_to_audio_track = {}
         for i, (a_s, loading_s) in enumerate(zip(av_container.streams.audio, audio_loading_container.streams.audio)):
-            a_s.thread_type = "FRAME"
-            loading_s.thread_type = "FRAME"
+            a_s.codec_context.thread_type = "FRAME"
+            loading_s.codec_context.thread_type = "FRAME"
             track = AudioTrack(self, a_s, loading_s, path, i, i)
             self.audio_tracks.append(track)
             stream_index_to_audio_track[a_s.index] = track
@@ -337,7 +315,7 @@ class AudioReader:
             self.stream = track.av_stream
 
         self.rate = self.stream.rate
-        self.codec = self.stream.codec_context
+        self.codec = cast(AudioCodecContext, self.stream.codec_context)
 
         self.cache_time = -1
         self.packet_i = 0
@@ -427,14 +405,14 @@ def channels_from_layout(layout):
         case _:
             raise ValueError
 
-def upmix(audio: np.array):
+def upmix(audio: np.ndarray):
     if audio.shape[0] == 1:
         return np.repeat(audio, 2, axis=0)
     elif audio.shape[0] == 2:
         return np.concatenate([audio, np.zeros((4, audio.shape[0]))])
     raise ValueError
 
-def downmix(audio: np.array):
+def downmix(audio: np.ndarray):
     if audio.shape[0] == 2:
         return np.mean(audio, axis=0, keepdims=True)
     elif audio.shape[0] == 6:
@@ -451,7 +429,7 @@ def downmix(audio: np.array):
         return stereo
     raise ValueError
 
-def channel_conversion(audio: np.array, layout):
+def channel_conversion(audio: np.ndarray, layout):
     c = audio.shape[0]
     target = channels_from_layout(layout)
     if c == target:
