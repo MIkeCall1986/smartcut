@@ -237,6 +237,7 @@ class VideoCutter:
             self.init_encoder()
             self.enc_codec = self.out_stream.codec_context
             self.enc_codec.options.update(self.encoding_options)
+            self.enc_codec.time_base = self.in_stream.time_base
             self.enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
         else:
