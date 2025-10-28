@@ -283,6 +283,8 @@ class VideoCutter:
         # Track stream continuity for CRA to BLA conversion
         self.last_remuxed_segment_gop_index = None
         self.is_first_remuxed_segment = True
+        # Track decoder continuity between GOPs: last GOP end DTS consumed
+        self._last_fetch_end_dts: int | None = None
 
     def _normalize_output_codec_tag(self, output_av_container: OutputContainer) -> None:
         """Ensure codec tags are compatible with MP4/MOV style containers."""
@@ -468,7 +470,16 @@ class VideoCutter:
             self.enc_last_pts = -1
             self.enc_codec = enc_codec
 
-        for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time):
+        # Determine if we should prime decoder from previous GOP (HEVC CRA at GOP start)
+        start_override = None
+        if (
+            self.codec_name == 'hevc'
+            and s.gop_index > 0
+            and self.media_container.gop_start_nal_types[s.gop_index] == 21
+        ):
+            start_override = self.media_container.gop_start_times_dts[s.gop_index - 1]
+
+        for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, start_override):
             in_tb = frame.time_base if frame.time_base is not None else self.in_stream.time_base
             if frame.pts * in_tb < s.start_time:
                 continue
@@ -658,12 +669,28 @@ class VideoCutter:
             # Packet is in our target range, yield it
             yield packet
 
-    def fetch_frame(self, gop_start_dts: int, gop_end_dts: int, end_time: Fraction):
-        # Initialize or reset for new GOP
-        if self.frame_buffer_gop_dts != gop_start_dts:
+    def fetch_frame(self, gop_start_dts: int, gop_end_dts: int, end_time: Fraction, start_dts_override: int | None = None):
+        # Check if previous iteration consumed exactly to this GOP start
+        continuous = (self._last_fetch_end_dts is not None and self._last_fetch_end_dts == gop_start_dts)
+
+        # Choose actual start DTS. Allow priming from previous GOP unless we're continuous.
+        start_dts = gop_start_dts if continuous else (start_dts_override if start_dts_override is not None else gop_start_dts)
+
+        # Initialize or reset for new GOP boundary unless continuous
+        if self.frame_buffer_gop_dts != gop_start_dts and not continuous:
             self.frame_buffer = []
             self.frame_buffer_gop_dts = gop_start_dts
             self.decoder.flush_buffers()
+
+        # If asked to start earlier than GOP, seek and clear state (skip if continuous)
+        if start_dts < gop_start_dts and not continuous:
+            try:
+                self.decoder.flush_buffers()
+                self.frame_buffer = []
+                self.input_av_container.seek(start_dts, stream=self.in_stream)
+                self.demux_saved_packet = None
+            except Exception:
+                pass
 
         # Get time_base for PTS calculations
         time_base = self.in_stream.time_base
@@ -671,7 +698,7 @@ class VideoCutter:
         # Process packets and yield frames when safe
         current_dts = gop_start_dts
 
-        for packet in self.fetch_packet(gop_start_dts, gop_end_dts):
+        for packet in self.fetch_packet(start_dts, gop_end_dts):
             current_dts = packet.dts if packet.dts is not None else current_dts
 
             # Decode packet and add frames to buffer
@@ -693,6 +720,7 @@ class VideoCutter:
                         yield frame
                     else:
                         # Safe frame is beyond end_time - we're done since all frames from now would be beyond end time
+                        self._last_fetch_end_dts = None
                         return
                 else:
                     break
@@ -720,6 +748,9 @@ class VideoCutter:
             else:
                 # Frame is outside time range, stop processing (leave it in buffer)
                 break
+
+        # Mark that we reached end of this GOP's packets (continuous demux position)
+        self._last_fetch_end_dts = gop_end_dts
 
 def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo | None = None, log_level: str | None = None, progress = None,
