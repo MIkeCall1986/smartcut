@@ -689,6 +689,9 @@ class VideoCutter:
                 self.frame_buffer = []
                 self.input_av_container.seek(start_dts, stream=self.in_stream)
                 self.demux_saved_packet = None
+              # Recreate demux iterator after an explicit seek to ensure position is honored
+                self.demux_iter = self.input_av_container.demux(self.in_stream)
+
             except Exception:
                 pass
 
