@@ -96,13 +96,6 @@ def make_cut_segments(media_container: MediaContainer,
 
     return cut_segments
 
-def map_codec_name_for_pyav15(codec_name: str) -> str:
-    """Map decoder names to encoder names for PyAV 15.0"""
-    codec_mapping = {
-        'libdav1d': 'libaom-av1',  # AV1 decoder to encoder
-    }
-    return codec_mapping.get(codec_name, codec_name)
-
 class PassthruAudioCutter:
     def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer,
                 track_index: int, export_settings: AudioExportSettings):
@@ -243,10 +236,15 @@ class VideoCutter:
         else:
             # Map codec name for decoder to encoder compatibility (AV1 case)
             original_codec_name = self.in_stream.codec_context.name
-            mapped_codec_name = map_codec_name_for_pyav15(original_codec_name)
+
+            codec_mapping = {
+                'libdav1d': 'libaom-av1',  # AV1 decoder to encoder
+            }
+
+            mapped_codec_name = codec_mapping.get(original_codec_name, original_codec_name)
 
             if mapped_codec_name != original_codec_name:
-                # Need to create stream with mapped codec name, not template
+                # Need to create stream with mapped codec name. Can't use copy from template b/c codec name has changed
                 self.out_stream = output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate)
                 self.out_stream.width = self.in_stream.width
                 self.out_stream.height = self.in_stream.height
@@ -256,8 +254,7 @@ class VideoCutter:
                 self.out_stream.disposition = self.in_stream.disposition.value
                 self.codec_name = mapped_codec_name
             else:
-                # TODO: this used to be the only branch. Verify the above (mapped branch) is necessary
-                # Use template if no mapping needed
+                # Copy the stream if no mapping needed
                 self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
                 self.out_stream.metadata.update(self.in_stream.metadata)
                 self.out_stream.disposition = self.in_stream.disposition.value
