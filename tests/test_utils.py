@@ -8,7 +8,7 @@ import requests
 import scipy.signal
 import soundfile as sf
 
-from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
+from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
 from smartcut.media_container import AudioTrack, MediaContainer
 from smartcut.misc_data import MixInfo
 
@@ -402,9 +402,11 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
 
 def run_cut_on_keyframes_test(input_path, output_path):
     source = MediaContainer(input_path)
-    cutpoints = source.gop_start_times_pts_s + [source.duration + 1]
+    cutpoints = source.gop_start_times_pts_s + [source.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+
+    segments = make_adjusted_segment_times(segments, source)
 
     cut_segments = make_cut_segments(source, segments)
     for c in cut_segments:

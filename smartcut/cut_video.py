@@ -59,6 +59,17 @@ def copy_packet(p) -> Packet:
 
     return packet
 
+def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer):
+    adjusted_segment_times = []
+    EPSILON = Fraction(1, 1_000_000)
+    for (s, e) in positive_segments:
+        if s <= EPSILON:
+            s = -10
+        if e >= media_container.duration - EPSILON:
+            e = media_container.duration + 10
+        adjusted_segment_times.append((s + media_container.start_time, e + media_container.start_time))
+    return adjusted_segment_times
+
 def make_cut_segments(media_container: MediaContainer,
         positive_segments: list[tuple[Fraction, Fraction]],
         keyframe_mode: bool = False
@@ -767,16 +778,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
-    adjusted_segment_times = []
-
-    EPSILON = Fraction(1, 1_000_000)
-    for (s, e) in positive_segments:
-        if s <= EPSILON:
-            s = -10
-        if e >= media_container.duration - EPSILON:
-            e = media_container.duration + 10
-        adjusted_segment_times.append((s + media_container.start_time, e + media_container.start_time))
-
+    adjusted_segment_times = make_adjusted_segment_times(positive_segments, media_container)
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
 
     if video_settings.mode == VideoExportMode.RECODE:

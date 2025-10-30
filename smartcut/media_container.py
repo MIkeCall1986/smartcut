@@ -59,6 +59,9 @@ class MediaContainer:
     audio_tracks: list[AudioTrack]
     subtitle_tracks: list
 
+    duration: Fraction
+    start_time: Fraction
+
     def __init__(self, path: str) -> None:
         self.path = path
 
@@ -72,9 +75,9 @@ class MediaContainer:
         self.chat_url = None
         self.chat_history = None
         self.chat_visualize = True
-        self.start_time = Fraction(av_container.start_time, AV_TIME_BASE) if av_container.start_time is not None else 0
+        self.start_time = Fraction(av_container.start_time, AV_TIME_BASE) if av_container.start_time is not None else Fraction(0)
         manual_duration_calc = av_container.duration is None
-        self.duration = Fraction(av_container.duration , AV_TIME_BASE) if av_container.duration is not None else 0
+        self.duration = Fraction(av_container.duration , AV_TIME_BASE) if av_container.duration is not None else Fraction(0)
 
         is_h264 = False
         is_h265 = False

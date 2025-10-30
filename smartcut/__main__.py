@@ -257,10 +257,10 @@ time formats:
     source = MediaContainer(args.input)
 
     if args.keep:
-        segments = parse_frame_segments(source, args.keep) if args.frames else parse_time_segments_with_duration(args.keep, source.duration())
+        segments = parse_frame_segments(source, args.keep) if args.frames else parse_time_segments_with_duration(args.keep, source.duration)
     elif args.cut:
-        cut_segments = parse_frame_segments(source, args.cut) if args.frames else parse_time_segments_with_duration(args.cut, source.duration())
-        segments = [(Fraction(0), source.duration())]
+        cut_segments = parse_frame_segments(source, args.cut) if args.frames else parse_time_segments_with_duration(args.cut, source.duration)
+        segments = [(Fraction(0), source.duration)]
         for c_start, c_end in cut_segments:
             last_segment = segments.pop()
             if c_start > last_segment[0]:
