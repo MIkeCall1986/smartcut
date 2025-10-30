@@ -449,3 +449,154 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     output_container = MediaContainer(output_path)
 
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
+
+
+def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20):
+    """
+    Test smart cutting on short segments from random positions in long videos.
+
+    Selects multiple random segments and merges them into a single output file,
+    then compares smart cut output against complete recode for quality validation.
+    This tests both the cutting algorithm and segment merging logic while being
+    much faster than testing the entire video.
+
+    Args:
+        input_path: Path to input video file
+        output_base_name: Base name for output files (will be suffixed)
+        segment_duration: Duration of each test segment in seconds
+        n_segments: Number of random segments to merge into one file
+        audio_export_info: Audio export settings (defaults to passthrough)
+        video_settings: Video export settings for smart cut
+        pixel_tolerance: Pixel difference tolerance for comparison
+    """
+    # Handle audio-only files
+    if os.path.splitext(input_path)[1] in ['.mp3', '.ogg']:
+        return run_audiofile_smartcut(input_path, output_base_name + '.ogg', 2)
+
+    source = MediaContainer(input_path)
+    total_duration = float(source.duration)
+
+    # Skip if video is too short for meaningful testing
+    if total_duration < segment_duration * n_segments * 2:
+        print(f"Video too short ({total_duration:.1f}s) for partial testing, using regular test")
+        return run_smartcut_test(input_path, output_base_name + os.path.splitext(input_path)[1], 2,
+                             audio_export_info, video_settings, pixel_tolerance)
+
+    # Calculate safe range for random segment selection (avoid first/last 30 seconds)
+    safe_start = 30
+    safe_end = total_duration - segment_duration - 30
+
+    if safe_end <= safe_start:
+        safe_start = segment_duration
+        safe_end = total_duration - segment_duration
+
+    # print(f"Testing {n_segments} segments of {segment_duration}s each merged into one file from {input_path}")
+
+    # Set up default audio export if not specified
+    if audio_export_info == 'auto':
+        s = AudioExportSettings(codec='passthru')
+        audio_export_info = AudioExportInfo(output_tracks=[s] * len(source.audio_tracks))
+
+    # Select multiple random non-overlapping segments
+    segments = []
+
+    # Generate all possible non-overlapping segments
+    max_segments = int((safe_end - safe_start) // (segment_duration + 1))  # +1 for minimum gap
+    if max_segments < n_segments:
+        print(f"  Warning: Can only fit {max_segments} non-overlapping segments, reducing from {n_segments}")
+        n_segments = max_segments
+
+    # Use a more systematic approach to ensure non-overlapping segments
+    attempts = 0
+    while len(segments) < n_segments and attempts < 100:
+        start_time = safe_start + np.random.random() * (safe_end - safe_start)
+        end_time = start_time + segment_duration
+
+        # Check if this segment overlaps with any existing segment
+        overlaps = False
+        for existing_start, existing_end in segments:
+            # Two segments overlap if: start < existing_end AND end > existing_start
+            if start_time < existing_end and end_time > existing_start:
+                overlaps = True
+                break
+
+        if not overlaps and end_time <= safe_end:
+            segments.append((start_time, end_time))
+
+        attempts += 1
+
+    if len(segments) < n_segments:
+        print(f"  Warning: Could only find {len(segments)} non-overlapping segments out of {n_segments} requested")
+
+    # Sort segments by start time (smart_cut expects them in chronological order)
+    segments.sort(key=lambda x: x[0])
+
+    # Print selected segments in chronological order
+    # for i, (start, end) in enumerate(segments):
+    #     print(f"  Segment {i+1}: {start:.1f}s to {end:.1f}s")
+
+    # Verify segments are non-overlapping after sorting
+    for i in range(len(segments) - 1):
+        current_end = segments[i][1]
+        next_start = segments[i + 1][0]
+        if current_end > next_start:
+            raise ValueError(f"Segments overlap after sorting: segment {i+1} ends at {current_end:.1f}s but segment {i+2} starts at {next_start:.1f}s")
+
+    # Output paths
+    smartcut_output = output_base_name + "_smartcut" + os.path.splitext(input_path)[1]
+    recode_output = output_base_name + "_recode" + os.path.splitext(input_path)[1]
+
+    # Test 1: Smart cut (default mode) - merges all segments into one file
+    smart_cut_settings = video_settings or VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
+    smart_cut(source, segments, smartcut_output,
+             audio_export_info=audio_export_info,
+             video_settings=smart_cut_settings,
+             log_level='warning')
+
+    # Test 2: Complete recode for comparison - merges all segments into one file
+    recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
+    smart_cut(source, segments, recode_output,
+             audio_export_info=audio_export_info,
+             video_settings=recode_settings,
+             log_level='warning')
+
+    # Compare results - both should produce equivalent output
+    smartcut_container = MediaContainer(smartcut_output)
+    recode_container = MediaContainer(recode_output)
+
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance)
+
+    smartcut_container.close()
+    recode_container.close()
+
+    source.close()
+
+def check_stream_dispositions(source_path, output_path):
+    """Helper function to verify that stream dispositions are preserved"""
+    with av.open(source_path) as source_container, av.open(output_path) as output_container:
+        # Check video stream disposition if it exists
+        if source_container.streams.video:
+            src_video = source_container.streams.video[0]
+            out_video = output_container.streams.video[0]
+            assert src_video.disposition.value == out_video.disposition.value, \
+                    f"Video disposition mismatch: {src_video.disposition} vs {out_video.disposition}"
+
+        # Check audio stream dispositions
+        assert len(source_container.streams.audio) == len(output_container.streams.audio), \
+                "Audio stream count mismatch"
+        for i, (src_audio, out_audio) in enumerate(zip(source_container.streams.audio, output_container.streams.audio)):
+            assert src_audio.disposition.value == out_audio.disposition.value, \
+                    f"Audio stream {i} disposition mismatch: {src_audio.disposition} vs {out_audio.disposition}"
+
+        # Check subtitle stream dispositions - this is the main focus
+        assert len(source_container.streams.subtitles) == len(output_container.streams.subtitles), \
+                "Subtitle stream count mismatch"
+        for i, (src_sub, out_sub) in enumerate(zip(source_container.streams.subtitles, output_container.streams.subtitles)):
+            assert src_sub.disposition.value == out_sub.disposition.value, \
+                    f"Subtitle stream {i} disposition mismatch: {src_sub.disposition} vs {out_sub.disposition}"
+
+            # Specifically check for forced flag preservation
+            src_forced = av.stream.Disposition.forced in src_sub.disposition
+            out_forced = av.stream.Disposition.forced in out_sub.disposition
+            assert src_forced == out_forced, \
+                    f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
