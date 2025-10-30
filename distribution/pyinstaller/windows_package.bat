@@ -12,6 +12,8 @@ venv\Scripts\pyinstaller --distpath .\dist --workpath .\build ^
  -n smartcut -y --hidden-import=uuid smartcut\__main__.py
 
 REM Create zip archive of directory output
+REM Wait briefly to ensure file handles are released before zipping
+timeout /t 3 /nobreak >nul
 powershell -Command "Compress-Archive -Path '.\dist\smartcut' -DestinationPath '.\dist\smartcut_win.zip' -Force"
 
 REM ..\sign.bat .\dist\smartcut.exe

@@ -46,6 +46,7 @@ test = [
 dev = [
     "build",
     "twine",
+    "pyinstaller",
 ]
 
 [project.urls]
