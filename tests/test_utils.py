@@ -449,7 +449,7 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
 
-def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20):
+def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20, recode_codec_override: str | None = None):
     """
     Test smart cutting on short segments from random positions in long videos.
 
@@ -552,7 +552,10 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
              log_level='warning')
 
     # Test 2: Complete recode for comparison - merges all segments into one file
-    recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
+    if recode_codec_override is not None:
+        recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override=recode_codec_override)
+    else:
+        recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
     smart_cut(source, segments, recode_output,
              audio_export_info=audio_export_info,
              video_settings=recode_settings,

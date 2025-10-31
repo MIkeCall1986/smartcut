@@ -743,6 +743,26 @@ def test_google_tears_of_steel():
     output_base = test_google_tears_of_steel.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto', pixel_tolerance=30)
 
+def test_libde265_tears_of_steel_h265():
+    """Test Tears of Steel (HEVC) from libde265 bitstreams using partial segments.
+
+    Downloads a long HEVC MKV sample and validates smart cut against a full
+    recode. For speed, force the recode path to H.264 while preserving HEVC
+    for the smart-cut path.
+    """
+    filename = cached_download('https://www.libde265.org/hevc-bitstreams/tos-1720x720-cfg01.mkv', 'libde265_tos_1720x720_cfg01.mkv')
+    output_base = test_libde265_tears_of_steel_h265.__name__
+    # Use partial segments for long video; override recode codec to H.264 for speed
+    run_partial_smart_cut(
+        filename,
+        output_base,
+        segment_duration=15,
+        n_segments=3,
+        audio_export_info='auto',
+        pixel_tolerance=50,
+        recode_codec_override='h264'
+    )
+
 def test_h264_non_idr_keyframes():
     """
     Test that H.264 non-IDR I-frame issues are properly handled.
@@ -1309,6 +1329,7 @@ def get_test_categories():
             # test-videos.co.uk H.265/HEVC samples
             test_testvideos_bigbuckbunny_h265,
             test_testvideos_jellyfish_h265,
+            test_libde265_tears_of_steel_h265,
         ],
 
         'real_world_vp9': [
