@@ -2,7 +2,6 @@ import argparse
 import sys
 from fractions import Fraction
 
-import av
 from tqdm import tqdm
 
 from smartcut.cut_video import (

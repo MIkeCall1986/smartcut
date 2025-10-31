@@ -1,28 +1,25 @@
-import contextlib
 import heapq
 import os
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import cast
 
 import av
 import av.bitstream
-import av.container
-from av import VideoCodecContext
-from av.packet import Packet
-from av.container import Container
+from av.stream import Disposition
+import numpy as np
+from av import VideoCodecContext, VideoStream
+from av.codec.context import CodecContext
 from av.container.input import InputContainer
 from av.container.output import OutputContainer
+from av.packet import Packet
 from av.video.frame import PictureType, VideoFrame
-from av.codec.context import CodecContext
-import numpy as np
 
 from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import convert_hevc_cra_to_bla
 
-with contextlib.suppress(ImportError):
-    from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
 
 class CancelObject:
     cancelled: bool = False
@@ -115,24 +112,27 @@ class PassthruAudioCutter:
         self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
 
         self.out_stream.metadata.update(self.track.av_stream.metadata)
-        self.out_stream.disposition = self.track.av_stream.disposition.value #pyright: ignore
+        self.out_stream.disposition = cast(Disposition, self.track.av_stream.disposition.value)
         self.segment_start_in_output = 0
         self.prev_dts = -100_000
         self.prev_pts = -100_000
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        start = 0 if cut_segment.start_time <= 0 else np.searchsorted(self.track.frame_times, cut_segment.start_time)
-        end = np.searchsorted(self.track.frame_times, cut_segment.end_time)
+        start = 0 if cut_segment.start_time <= 0 else np.searchsorted(self.track.frame_times, float(cut_segment.start_time))
+        end = np.searchsorted(self.track.frame_times, float(cut_segment.end_time))
         in_packets = self.track.packets[start : end]
 
         in_tb = self.track.av_stream.time_base
+        assert in_tb
         packets = []
         for p in in_packets:
+            if p.dts is None or p.pts is None:
+                continue
             packet = copy_packet(p)
             # packet = p
             packet.stream = self.out_stream
-            packet.pts = int(packet.pts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
-            packet.dts = int(packet.dts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+            packet.pts = int(p.pts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+            packet.dts = int(p.dts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
             if packet.pts <= self.prev_pts:
                 print("Correcting for too low pts in audio passthru")
                 packet.pts = self.prev_pts + 1
@@ -157,15 +157,17 @@ class SubtitleCutter:
         self.in_stream = media_container.av_containers[0].streams.subtitles[subtitle_track_index]
         self.out_stream = output_av_container.add_stream_from_template(self.in_stream)
         self.out_stream.metadata.update(self.in_stream.metadata)
-        self.out_stream.disposition = self.in_stream.disposition.value
+        self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
         self.segment_start_in_output = 0
         self.prev_pts = -100_000
 
         self.current_packet_i = 0
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        segment_start_pts = int(cut_segment.start_time / self.in_stream.time_base)
-        segment_end_pts = int(cut_segment.end_time / self.in_stream.time_base)
+        in_tb = self.in_stream.time_base
+        assert in_tb is not None
+        segment_start_pts = int(cut_segment.start_time / in_tb)
+        segment_end_pts = int(cut_segment.end_time / in_tb)
 
         out_packets = []
 
@@ -184,7 +186,7 @@ class SubtitleCutter:
 
         for packet in out_packets:
             packet.stream = self.out_stream
-            packet.pts = int(packet.pts - segment_start_pts + self.segment_start_in_output / self.in_stream.time_base)
+            packet.pts = int(packet.pts - segment_start_pts + self.segment_start_in_output / in_tb)
 
             if packet.pts < self.prev_pts:
                 print("Correcting for too low pts in subtitle passthru. This should not happen.")
@@ -217,6 +219,7 @@ class VideoCutter:
         self.enc_codec = None
 
         self.in_stream = media_container.video_stream
+        assert self.in_stream is not None
         # Open another container because seeking to beginning of the file is unreliable...
         self.input_av_container: InputContainer = av.open(media_container.path, 'r', metadata_errors='ignore')
 
@@ -229,13 +232,13 @@ class VideoCutter:
         self.decoder = self.in_stream.codec_context
 
         if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
-            self.out_stream = output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'})
+            self.out_stream = cast(VideoStream, output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'}))
             self.out_stream.width = self.in_stream.width
             self.out_stream.height = self.in_stream.height
             if self.in_stream.sample_aspect_ratio is not None:
                 self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
             self.out_stream.metadata.update(self.in_stream.metadata)
-            self.out_stream.disposition = self.in_stream.disposition.value
+            self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
             self.codec_name = video_settings.codec_override
 
             self.init_encoder()
@@ -256,19 +259,19 @@ class VideoCutter:
 
             if mapped_codec_name != original_codec_name:
                 # Need to create stream with mapped codec name. Can't use copy from template b/c codec name has changed
-                self.out_stream = output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate)
+                self.out_stream = cast(VideoStream, output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate))
                 self.out_stream.width = self.in_stream.width
                 self.out_stream.height = self.in_stream.height
                 if self.in_stream.sample_aspect_ratio is not None:
                     self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
                 self.out_stream.metadata.update(self.in_stream.metadata)
-                self.out_stream.disposition = self.in_stream.disposition.value
+                self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
                 self.codec_name = mapped_codec_name
             else:
                 # Copy the stream if no mapping needed
                 self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
                 self.out_stream.metadata.update(self.in_stream.metadata)
-                self.out_stream.disposition = self.in_stream.disposition.value
+                self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
                 self.out_stream.time_base = self.in_stream.time_base
                 self.codec_name = original_codec_name
 
@@ -831,15 +834,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
 
             if audio_export_info is not None:
-                if audio_export_info.mix_export_settings is not None:
-                    generators.append(MixAudioCutter(media_container, output_av_container,
-                                                    audio_export_info.mix_info, audio_export_info.mix_export_settings))
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
-                    if track_export_settings is not None:
-                        if track_export_settings.codec == 'passthru':
-                            generators.append(PassthruAudioCutter(media_container, output_av_container, track_i, track_export_settings))
-                        else:
-                            generators.append(RecodeTrackAudioCutter(media_container, output_av_container, track_i, track_export_settings))
+                    if track_export_settings is not None and  track_export_settings.codec == 'passthru':
+                        generators.append(PassthruAudioCutter(media_container, output_av_container, track_i, track_export_settings))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 generators.append(SubtitleCutter(media_container, output_av_container, sub_track_i))

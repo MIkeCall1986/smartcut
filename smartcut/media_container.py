@@ -1,17 +1,11 @@
 from dataclasses import dataclass, field
 from fractions import Fraction
-from itertools import chain
-from typing import cast
 
-import av
-import av.stream
-import av.video
-from av import AudioCodecContext, Packet, VideoStream, AudioResampler
-from av.packet import Packet
-from av.container import Container
+import numpy as np
+from av import AudioStream, Packet, VideoStream
+from av import open as av_open
 from av.container.input import InputContainer
 from av.stream import Stream
-import numpy as np
 
 from smartcut.nal_tools import (
     get_h264_nal_unit_type,
@@ -29,8 +23,7 @@ AV_TIME_BASE: int = 1000000
 @dataclass
 class AudioTrack:
     media_container: object
-    av_stream: Stream
-    audio_load_stream: Stream
+    av_stream: AudioStream
     path: str
     index: int
 
@@ -67,8 +60,8 @@ class MediaContainer:
         frame_pts = []
         self.video_keyframe_indices = []
 
-        av_container = av.open(path, 'r', metadata_errors='ignore')
-        audio_loading_container = av.open(path, 'r', metadata_errors='ignore')
+        av_container = av_open(path, 'r', metadata_errors='ignore')
+        audio_loading_container = av_open(path, 'r', metadata_errors='ignore')
         self.av_containers = [av_container, audio_loading_container]
 
         self.chat_url = None
@@ -191,7 +184,7 @@ class MediaContainer:
             return  # Nothing to fill
 
         # Open a new container for the second pass
-        av_container = av.open(self.path, 'r', metadata_errors='ignore')
+        av_container = av_open(self.path, 'r', metadata_errors='ignore')
         video_stream = av_container.streams.video[0]
 
         try:
