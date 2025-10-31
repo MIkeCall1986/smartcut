@@ -28,9 +28,6 @@ class AudioTrack:
     packets: list[Packet] = field(default_factory = lambda: [])
     frame_times: np.ndarray | list[int] = field(default_factory = lambda: [])
 
-    def start_time(self) -> Fraction:
-        return self.media_container.start_time
-
 class MediaContainer:
     av_container: InputContainer
     video_stream: VideoStream | None
