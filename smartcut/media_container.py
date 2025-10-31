@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 import numpy as np
-from av import AudioStream, Packet, VideoStream
+from av import AudioStream, Packet, VideoStream, time_base as AV_TIME_BASE
 from av import open as av_open
 from av.container.input import InputContainer
 from av.stream import Stream
@@ -17,8 +17,6 @@ from smartcut.nal_tools import (
 
 def ts_to_time(ts: float) -> Fraction:
     return Fraction(round(ts*1000), 1000)
-
-AV_TIME_BASE: int = 1000000
 
 @dataclass
 class AudioTrack:

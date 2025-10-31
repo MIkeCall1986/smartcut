@@ -2,14 +2,16 @@ import os
 import platform
 from collections.abc import Iterable
 from fractions import Fraction
+from typing import Any, cast
 
 import numpy as np
 import requests
 import scipy.signal
 import soundfile as sf
-from av import AudioFrame, VideoFrame
+from av import AudioFrame, AudioStream, Packet, VideoFrame, VideoStream
 from av import open as av_open
 from av import time_base as AV_TIME_BASE
+from av.container.input import InputContainer
 from av.stream import Disposition
 
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
@@ -17,6 +19,8 @@ from smartcut.media_container import AudioTrack, MediaContainer
 from smartcut.misc_data import MixInfo
 
 import ffmpeg
+
+AV_TIME_BASE_VALUE: int = int(AV_TIME_BASE) if AV_TIME_BASE else 1
 
 
 def _ensure_fraction(value: Fraction | int | float) -> Fraction:
@@ -74,7 +78,7 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
     options = {'x265-params': ':'.join(x265_options)}
     if profile is not None:
         options['profile'] = profile
-    stream = container.add_stream(codec, rate=fps, options=options)
+    stream = cast(VideoStream, container.add_stream(codec, rate=fps, options=options))
     stream.width = resolution[0]
     stream.height = resolution[1]
     stream.pix_fmt = pixel_format
@@ -96,15 +100,15 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
 
 def av_write_ogg(path, wave, sample_rate):
     with av_open(path, 'w') as out:
-        s = out.add_stream('libvorbis', sample_rate, layout='mono')
+        stream = cast(AudioStream, out.add_stream('libvorbis', sample_rate, layout='mono'))
         wave = wave.astype(np.float32)
         wave = np.expand_dims(wave, 0)
         frame = AudioFrame.from_ndarray(wave, format='fltp', layout='mono')
         frame.sample_rate = sample_rate
         frame.pts = 0
         packets = []
-        packets.extend(s.encode(frame))
-        packets.extend(s.encode(None))
+        packets.extend(stream.encode(frame))
+        packets.extend(stream.encode(None))
         for p in packets:
             out.mux(p)
 
@@ -136,17 +140,27 @@ def generate_double_sine_wave(duration, path, frequency_0=440, frequency_1=440, 
 def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
     """Decode the entire audio stream for a test track into a numpy array."""
     decoded: list[np.ndarray] = []
-    sample_rate = None
+    sample_rate: int | None = None
+    expected_channels: int = 1
+    fallback_rate: int = 48_000
 
-    with av_open(track.path, 'r', metadata_errors='ignore') as container:
-        stream = container.streams.audio[track.index]
-        stream.codec_context.thread_type = "FRAME"
+    with av_open(track.path, 'r', metadata_errors='ignore') as container_raw:
+        container = cast(InputContainer, container_raw)
+        stream = cast(AudioStream, container.streams.audio[track.index])
+        codec_context = stream.codec_context
+        if codec_context is None:
+            raise AssertionError("Audio stream is missing codec context")
+        codec_context.thread_type = "FRAME"
 
-        expected_channels = stream.channels or 1
-        fallback_rate = stream.rate or 48_000
+        expected_channels = stream.channels or expected_channels
+        fallback_rate = stream.rate or fallback_rate
 
         for packet in container.demux(stream):
+            if not isinstance(packet, Packet):
+                continue
             for frame in packet.decode():
+                if not isinstance(frame, AudioFrame):
+                    continue
                 array = frame.to_ndarray()
 
                 if array.ndim == 1:
@@ -161,17 +175,20 @@ def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
                     else:
                         raise AssertionError(f"Unexpected audio frame shape {array.shape} for {expected_channels} channel(s)")
 
-                if not np.issubdtype(array.dtype, np.floating):
-                    info = np.iinfo(array.dtype)
+                if np.issubdtype(array.dtype, np.integer):
+                    dtype_obj = cast(np.dtype[np.integer[Any]], array.dtype)
+                    info = np.iinfo(dtype_obj)
                     scale = max(abs(info.min), abs(info.max))
                     if scale == 0:
                         raise AssertionError("Audio frame has zero dynamic range")
                     array = array.astype(np.float32) / scale
-                else:
+                elif np.issubdtype(array.dtype, np.floating):
                     array = array.astype(np.float32, copy=False)
+                else:
+                    raise AssertionError(f"Unsupported audio dtype {array.dtype}")
 
                 decoded.append(array)
-                if frame.sample_rate:
+                if frame.sample_rate is not None:
                     sample_rate = frame.sample_rate
 
     if not decoded:
@@ -349,8 +366,12 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
     failed_frames = 0
-    with av_open(source_container.path, mode='r') as source_av, av_open(result_container.path, mode='r') as result_av:
+    with av_open(source_container.path, mode='r') as source_av_raw, av_open(result_container.path, mode='r') as result_av_raw:
+        source_av = cast(InputContainer, source_av_raw)
+        result_av = cast(InputContainer, result_av_raw)
         for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
+            if not isinstance(source_frame, VideoFrame) or not isinstance(result_frame, VideoFrame):
+                continue
             source_numpy = source_frame.to_ndarray(format='rgb24')
             result_numpy = result_frame.to_ndarray(format='rgb24')
             assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
@@ -373,12 +394,13 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
             if frame_failed:
                 failed_frames += 1
 
-def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0.0, duration=None, pixel_tolerance=20):
+def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time: float | Fraction = 0.0, duration: float | None = None, pixel_tolerance=20):
     """Fast pixel testing of small video segments instead of entire video"""
     if duration is None:
         duration = min(10, float(source_container.duration))  # Test max 10 seconds
 
-    end_time = start_time + duration
+    start = float(start_time)
+    end_time = start + duration
 
     # Basic structure checks
     source_stream = source_container.video_stream
@@ -389,17 +411,24 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
     assert source_stream.height == result_stream.height
 
     frames_checked = 0
-    with av_open(source_container.path, mode='r') as source_av, av_open(result_container.path, mode='r') as result_av:
+    seek_target = int(start * AV_TIME_BASE_VALUE)
+    with av_open(source_container.path, mode='r') as source_av_raw, av_open(result_container.path, mode='r') as result_av_raw:
+        source_av = cast(InputContainer, source_av_raw)
+        result_av = cast(InputContainer, result_av_raw)
         # Seek to start time
-        source_av.seek(int(start_time * AV_TIME_BASE))
-        result_av.seek(int(start_time * AV_TIME_BASE))
+        source_av.seek(seek_target)
+        result_av.seek(seek_target)
 
         source_decoder = source_av.decode(video=0)
         result_decoder = result_av.decode(video=0)
 
         for source_frame, result_frame in zip(source_decoder, result_decoder):
-            frame_time = source_frame.pts * source_frame.time_base
-            if frame_time < start_time:
+            if not isinstance(source_frame, VideoFrame) or not isinstance(result_frame, VideoFrame):
+                continue
+            if source_frame.pts is None or source_frame.time_base is None:
+                continue
+            frame_time = float(source_frame.pts * source_frame.time_base)
+            if frame_time < start:
                 continue
             if frame_time > end_time:
                 break
@@ -426,9 +455,6 @@ def run_cut_on_keyframes_test(input_path, output_path):
     cutpoints = source.gop_start_times_pts_s + [source.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-    segments = to_fraction_segments(segments)
-    segments = to_fraction_segments(segments)
-    segments = to_fraction_segments(segments)
     segments = to_fraction_segments(segments)
 
     segments = make_adjusted_segment_times(segments, source)
@@ -607,7 +633,9 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
 
 def check_stream_dispositions(source_path, output_path):
     """Helper function to verify that stream dispositions are preserved"""
-    with av_open(source_path) as source_container, av_open(output_path) as output_container:
+    with av_open(source_path) as source_raw, av_open(output_path) as output_raw:
+        source_container = cast(InputContainer, source_raw)
+        output_container = cast(InputContainer, output_raw)
         # Check video stream disposition if it exists
         if source_container.streams.video:
             src_video = source_container.streams.video[0]

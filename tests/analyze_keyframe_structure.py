@@ -7,28 +7,35 @@ Standalone tool for debugging GOP detection and keyframe analysis.
 import os
 import sys
 from pathlib import Path
+from typing import cast
 
+from av import VideoStream
 from av import open as av_open
 from av import time_base as AV_TIME_BASE
+from av.container.input import InputContainer
 
 from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+AV_TIME_BASE_VALUE: int = int(AV_TIME_BASE) if AV_TIME_BASE else 1
+
+
 def analyze_keyframes_structure(input_path):
     """Analyze and display keyframe structure of the input video"""
     try:
 
         # Open file directly to analyze all keyframes
-        av_container = av_open(input_path, 'r', metadata_errors='ignore')
-        video_stream = None
+        container_raw = av_open(input_path, 'r', metadata_errors='ignore')
+        av_container = cast(InputContainer, container_raw)
+        video_stream: VideoStream | None = None
 
         if len(av_container.streams.video) == 0:
             print("No video stream found in file.")
             return
 
-        video_stream = av_container.streams.video[0]
+        video_stream = cast(VideoStream, av_container.streams.video[0])
         video_stream.thread_type = "FRAME"
 
         print(f"Keyframe Analysis for: {input_path}")
@@ -36,7 +43,11 @@ def analyze_keyframes_structure(input_path):
 
         # Basic video info
         ctx = video_stream.codec_context
-        duration = float(av_container.duration / AV_TIME_BASE)
+        if ctx is None:
+            print("Video stream missing codec context.")
+            return
+        duration_pts = av_container.duration
+        duration = float(duration_pts / AV_TIME_BASE_VALUE) if duration_pts is not None else 0.0
 
         print("Video info:")
         print(f"  Codec: {ctx.name}")
@@ -53,7 +64,7 @@ def analyze_keyframes_structure(input_path):
 
         # First pass: collect all packets
         for packet in av_container.demux(video_stream):
-            if packet.pts is None:
+            if packet.pts is None or packet.time_base is None:
                 continue
 
             if packet.stream.type == 'video':

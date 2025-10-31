@@ -222,7 +222,7 @@ class VideoCutter:
         # Assert time_base is not None once at initialization
         assert self.in_stream.time_base is not None, "Video stream must have a time_base"
         self.in_time_base: Fraction = self.in_stream.time_base
-        
+
         # Open another container because seeking to beginning of the file is unreliable...
         self.input_av_container: InputContainer = av.open(media_container.path, 'r', metadata_errors='ignore')
 
@@ -242,6 +242,7 @@ class VideoCutter:
                 self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
             self.out_stream.metadata.update(self.in_stream.metadata)
             self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
+            self.out_stream.time_base = self.in_time_base
             self.codec_name = video_settings.codec_override
 
             self.init_encoder()
@@ -269,6 +270,7 @@ class VideoCutter:
                     self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
                 self.out_stream.metadata.update(self.in_stream.metadata)
                 self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
+                self.out_stream.time_base = self.in_stream.time_base
                 self.codec_name = mapped_codec_name
             else:
                 # Copy the stream if no mapping needed
@@ -293,7 +295,7 @@ class VideoCutter:
                 self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('dump_extra', self.in_stream, self.out_stream)
 
         self._normalize_output_codec_tag(output_av_container)
-        
+
         # Assert out_stream time_base is not None once at initialization
         assert self.out_stream.time_base is not None, "Output stream must have a time_base"
         self.out_time_base: Fraction = self.out_stream.time_base
@@ -493,7 +495,7 @@ class VideoCutter:
             if self.codec_name == 'mpeg2video':
                 enc_codec.time_base = Fraction(1, muxing_codec.rate)
             else:
-                enc_codec.time_base = self.out_stream.time_base
+                enc_codec.time_base = self.out_time_base
             #enc_codec.flags = muxing_codec.flags # This was here, but it's a bit sus. Disabling doesn't break any tests
             #enc_codec.flags ^= Flags.global_header # either doesn't help or doesn't work
 
@@ -576,13 +578,11 @@ class VideoCutter:
                 first_packet = False
 
             # Apply timing adjustments
-            packet.pts -= segment_start_pts
-            packet.pts = packet.pts * self.in_time_base / self.out_time_base
-            packet.pts += self.segment_start_in_output / self.out_time_base
+            segment_start_offset = self.segment_start_in_output / self.out_time_base
+            pts = packet.pts if packet.pts else 0
+            packet.pts = int((pts - segment_start_pts) * self.in_time_base / self.out_time_base + segment_start_offset)
             if packet.dts is not None:
-                packet.dts -= segment_start_pts
-                packet.dts = packet.dts * self.in_time_base / self.out_time_base
-                packet.dts += self.segment_start_in_output / self.out_time_base
+                packet.dts = int((packet.dts - segment_start_pts) * self.in_time_base / self.out_time_base + segment_start_offset)
 
             result_packets.extend(self.remux_bitstream_filter.filter(packet))
 
@@ -659,8 +659,11 @@ class VideoCutter:
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
-                p.pts = p.pts * p.time_base / self.out_time_base
-                p.dts = p.dts * p.time_base / self.out_time_base
+                if p.time_base is not None:
+                    if p.pts is not None:
+                        p.pts = int(p.pts * p.time_base / self.out_time_base)
+                    if p.dts is not None:
+                        p.dts = int(p.dts * p.time_base / self.out_time_base)
                 p.time_base = self.out_time_base
 
         self.enc_codec = None

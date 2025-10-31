@@ -492,8 +492,9 @@ def test_vorbis_passthru():
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
     assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
-     # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    assert suffix_container.audio_tracks[0].packets[0].pts < 1000
+    # The cut point is not on packet boundary so the audio stream doesn't start at 0
+    first_packet = suffix_container.audio_tracks[0].packets[0]
+    assert first_packet.pts is not None and first_packet.pts < 1000, "Expected first packet pts to be near zero"
 
 def test_mp3_passthru():
     filename = 'basic.mp3'
@@ -528,8 +529,9 @@ def test_mp3_passthru():
     smart_cut(source_container, segments, suffix_output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(suffix_output_path)
     assert suffix_container.duration > 14.8 and suffix_container.duration < 15.1
-     # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    assert suffix_container.audio_tracks[0].packets[0].pts < 1000
+    # The cut point is not on packet boundary so the audio stream doesn't start at 0
+    first_packet = suffix_container.audio_tracks[0].packets[0]
+    assert first_packet.pts is not None and first_packet.pts < 1000, "Expected first packet pts to be near zero"
 
 def test_mkv_with_video_and_audio_passthru():
     file_duration = 30
