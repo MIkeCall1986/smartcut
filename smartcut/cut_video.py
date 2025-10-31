@@ -27,7 +27,7 @@ class CancelObject:
 @dataclass
 class FrameHeapItem:
     """Wrapper for frames in the heap, sorted by PTS"""
-    pts: int
+    pts: int | None
     frame: VideoFrame
 
     def __lt__(self, other: 'FrameHeapItem') -> bool:
@@ -36,7 +36,9 @@ class FrameHeapItem:
         other_pts = other.pts if other.pts is not None else -1
         return self_pts < other_pts
 
-def is_annexb(packet: Packet) -> bool:
+def is_annexb(packet: Packet | bytes | None) -> bool:
+        if packet is None:
+            return False
         data = bytes(packet)
         return data[:3] == b'\0\0\x01' or data[:4] == b'\0\0\0\x01'
 
@@ -122,8 +124,7 @@ class PassthruAudioCutter:
         end = np.searchsorted(self.track.frame_times, float(cut_segment.end_time))
         in_packets = self.track.packets[start : end]
 
-        in_tb = self.track.av_stream.time_base
-        assert in_tb
+        in_tb = cast(Fraction, self.track.av_stream.time_base)
         packets = []
         for p in in_packets:
             if p.dts is None or p.pts is None:
@@ -164,8 +165,7 @@ class SubtitleCutter:
         self.current_packet_i = 0
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        in_tb = self.in_stream.time_base
-        assert in_tb is not None
+        in_tb = cast(Fraction, self.in_stream.time_base)
         segment_start_pts = int(cut_segment.start_time / in_tb)
         segment_end_pts = int(cut_segment.end_time / in_tb)
 
@@ -219,6 +219,10 @@ class VideoCutter:
         self.enc_codec = None
 
         self.in_stream = cast(VideoStream, media_container.video_stream)
+        # Assert time_base is not None once at initialization
+        assert self.in_stream.time_base is not None, "Video stream must have a time_base"
+        self.in_time_base: Fraction = self.in_stream.time_base
+        
         # Open another container because seeking to beginning of the file is unreliable...
         self.input_av_container: InputContainer = av.open(media_container.path, 'r', metadata_errors='ignore')
 
@@ -243,7 +247,7 @@ class VideoCutter:
             self.init_encoder()
             self.enc_codec = self.out_stream.codec_context
             self.enc_codec.options.update(self.encoding_options)
-            self.enc_codec.time_base = self.in_stream.time_base
+            self.enc_codec.time_base = self.in_time_base
             self.enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
         else:
@@ -289,6 +293,10 @@ class VideoCutter:
                 self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('dump_extra', self.in_stream, self.out_stream)
 
         self._normalize_output_codec_tag(output_av_container)
+        
+        # Assert out_stream time_base is not None once at initialization
+        assert self.out_stream.time_base is not None, "Output stream must have a time_base"
+        self.out_time_base: Fraction = self.out_stream.time_base
 
         self.last_dts = -100_000_000
 
@@ -310,8 +318,7 @@ class VideoCutter:
         if not any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm')):
             return
 
-        out_codec_ctx = self.out_stream.codec_context
-        assert out_codec_ctx is not None
+        out_codec_ctx = cast(CodecContext, self.out_stream.codec_context)
         if codec_name == 'h264' and self._is_mpegts_h264_tag(out_codec_ctx.codec_tag):
             out_codec_ctx.codec_tag = 'avc1'
         elif codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(out_codec_ctx.codec_tag):
@@ -424,8 +431,6 @@ class VideoCutter:
 
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        self.out_time_base = self.out_stream.time_base
-
         if cut_segment.require_recode:
             packets = self.recode_segment(cut_segment)
         else:
@@ -473,7 +478,7 @@ class VideoCutter:
 
         if self.enc_codec is None:
             muxing_codec = self.out_stream.codec_context
-            enc_codec: VideoCodecContext = CodecContext.create(self.codec_name, 'w')
+            enc_codec = cast(VideoCodecContext, CodecContext.create(self.codec_name, 'w'))
 
             if muxing_codec.rate is not None:
                 enc_codec.rate = muxing_codec.rate
@@ -511,10 +516,7 @@ class VideoCutter:
             start_override = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
         for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, start_override):
-            assert self.in_stream is not None
-            in_stream_tb = self.in_stream.time_base
-            assert in_stream_tb is not None
-            in_tb = frame.time_base if frame.time_base is not None else in_stream_tb
+            in_tb = frame.time_base if frame.time_base is not None else self.in_time_base
             if frame.pts * in_tb < s.start_time:
                 continue
             if frame.pts * in_tb >= s.end_time:
@@ -544,10 +546,7 @@ class VideoCutter:
 
     def remux_segment(self, s: CutSegment) -> list[Packet]:
         result_packets = []
-        assert self.in_stream is not None
-        in_tb = self.in_stream.time_base
-        assert in_tb is not None
-        segment_start_pts = int(s.start_time / in_tb)
+        segment_start_pts = int(s.start_time / self.in_time_base)
 
         # Check if we need CRA to BLA conversion for this segment
         should_convert_cra = self._should_convert_cra_for_segment(s)
@@ -578,11 +577,11 @@ class VideoCutter:
 
             # Apply timing adjustments
             packet.pts -= segment_start_pts
-            packet.pts = packet.pts * in_tb / self.out_time_base
+            packet.pts = packet.pts * self.in_time_base / self.out_time_base
             packet.pts += self.segment_start_in_output / self.out_time_base
             if packet.dts is not None:
                 packet.dts -= segment_start_pts
-                packet.dts = packet.dts * in_tb / self.out_time_base
+                packet.dts = packet.dts * self.in_time_base / self.out_time_base
                 packet.dts += self.segment_start_in_output / self.out_time_base
 
             result_packets.extend(self.remux_bitstream_filter.filter(packet))
@@ -668,9 +667,6 @@ class VideoCutter:
         return result_packets
 
     def fetch_packet(self, target_dts: int, end_dts: int):
-        assert self.in_stream is not None
-        tb = self.in_stream.time_base
-
         # First, check if we have a saved packet from previous call
         if self.demux_saved_packet is not None:
             saved_dts = self.demux_saved_packet.dts if self.demux_saved_packet.dts is not None else -100_000_000
@@ -691,9 +687,9 @@ class VideoCutter:
 
             # Skip packets before target_dts
             if packet.pts is None or in_dts < target_dts:
-                diff = (target_dts - in_dts) * tb
+                diff = (target_dts - in_dts) * self.in_time_base
                 if in_dts > 0 and diff > 120:
-                    t = int(target_dts - 30 / tb)
+                    t = int(target_dts - 30 / self.in_time_base)
                     # print(f"Seeking to skip a gap: {float(t * tb)}")
                     self.input_av_container.seek(t, stream = self.in_stream)
                     # Clear saved packet after seek since iterator position changed
@@ -736,10 +732,6 @@ class VideoCutter:
             except Exception:
                 pass
 
-        # Get time_base for PTS calculations
-        assert self.in_stream is not None
-        time_base = self.in_stream.time_base
-
         # Process packets and yield frames when safe
         current_dts = gop_start_dts
 
@@ -757,7 +749,7 @@ class VideoCutter:
                 lowest_heap_item = self.frame_buffer[0]  # Peek at heap minimum
                 frame = lowest_heap_item.frame
                 frame_pts = lowest_heap_item.pts if lowest_heap_item.pts is not None else -1
-                frame_time_base = frame.time_base if frame.time_base is not None else time_base
+                frame_time_base = frame.time_base if frame.time_base is not None else self.in_time_base
 
                 # Only process frames that are safe to release (frame_pts <= current_dts)
                 if frame_pts <= current_dts:
@@ -783,7 +775,7 @@ class VideoCutter:
             # Peek at the next frame without popping it
             next_frame = self.frame_buffer[0]
             frame = next_frame.frame
-            frame_time_base = frame.time_base if frame.time_base is not None else time_base
+            frame_time_base = frame.time_base if frame.time_base is not None else self.in_time_base
 
             if (next_frame.pts is not None and
                 next_frame.pts * frame_time_base < end_time):
@@ -870,7 +862,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 if progress is not None:
                     progress.emit(previously_done_segments)
                 previously_done_segments += 1
-                assert s.start_time < s.end_time
+                assert s.start_time < s.end_time, f"Invalid segment: start_time {s.start_time} >= end_time {s.end_time}"
                 for g in generators:
                     for packet in g.segment(s):
                         if packet.dts < -900_000:

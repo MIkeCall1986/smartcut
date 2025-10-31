@@ -8,9 +8,10 @@ import traceback
 from fractions import Fraction
 from time import time
 
-import av
-import av.datasets as av_datasets
-import av.logging
+from av import logging as av_logging
+from av import open as av_open
+from av import datasets as av_datasets
+from av.stream import Disposition
 import ffmpeg
 import numpy as np
 import requests
@@ -26,11 +27,14 @@ from test_utils import *
 
 DEFAULT_SEED = 12345
 
+manual_input: list[str] | None = None
+pixel_color_diff_tolerance: int = 20
+
 # Set the log level to silence the None dts warnings. I believe those can be ignored since
 # we do set dts, except when it's not set in the source in which case it's not clear what
 # value dts should take. It would be nice to occasionally check that there aren't more warnings.
 # UPDATE 2024-09-13: setting logging level to FATAL because mpeg2 tests spam a lot of buffer errors I didn't manage to silence
-av.logging.set_level(av.logging.FATAL)
+av_logging.set_level(av_logging.FATAL)
 
 data_dir = 'test_data'
 
@@ -162,6 +166,7 @@ def test_h264_multiple_cuts():
         cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, c, replace=False))) + [source.duration]
 
         segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+        segments = to_fraction_segments(segments)
 
         smart_cut(source, segments, output_path, log_level='warning')
         result_container = MediaContainer(output_path)
@@ -230,12 +235,13 @@ def test_peaks_mkv_memory_usage():
     monitor.daemon = True
     monitor.start()
 
+    output_path = test_peaks_mkv_memory_usage.__name__ + '.mp4'
+
     try:
-        output_path = test_peaks_mkv_memory_usage.__name__ + '.mp4'
         segments = [(Fraction(0), Fraction(5))]
 
         container = MediaContainer(peaks_path)
-        audio_settings = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
+        audio_settings: list[AudioExportSettings | None] = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
         export_info = AudioExportInfo(output_tracks=audio_settings)
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
@@ -393,6 +399,7 @@ def test_video_recode_codec_override():
     cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
 
     output_path_a = test_video_recode_codec_override.__name__ + 'a.mkv'
     output_path_b = test_video_recode_codec_override.__name__ + 'b.mkv'
@@ -401,14 +408,18 @@ def test_video_recode_codec_override():
     smart_cut(source_container, segments, output_path_a, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_a)
-    assert output_container.video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {output_container.video_stream.codec_context.name}'
+    video_stream = output_container.video_stream
+    assert video_stream is not None, 'Expected video stream in output'
+    assert video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
     video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override='hevc')
     smart_cut(source_container, segments, output_path_b, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_b)
-    assert output_container.video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {output_container.video_stream.codec_context.name}'
+    video_stream = output_container.video_stream
+    assert video_stream is not None, 'Expected video stream in output'
+    assert video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
     assert os.path.getsize(output_path_b) > os.path.getsize(output_path_a)
@@ -417,14 +428,18 @@ def test_video_recode_codec_override():
     smart_cut(source_container, segments, output_path_a, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_a)
-    assert output_container.video_stream.codec_context.name == 'vp9', f'codec should be vp9, found {output_container.video_stream.codec_context.name}'
+    video_stream = output_container.video_stream
+    assert video_stream is not None, 'Expected video stream in output'
+    assert video_stream.codec_context.name == 'vp9', f'codec should be vp9, found {video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
     video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override='vp9')
     smart_cut(source_container, segments, output_path_b, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_b)
-    assert output_container.video_stream.codec_context.name == 'vp9', f'codec should be vp9, found {output_container.video_stream.codec_context.name}'
+    video_stream = output_container.video_stream
+    assert video_stream is not None, 'Expected video stream in output'
+    assert video_stream.codec_context.name == 'vp9', f'codec should be vp9, found {video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
     assert os.path.getsize(output_path_b) > os.path.getsize(output_path_a)
@@ -460,6 +475,7 @@ def test_vorbis_passthru():
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [file_duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
     export_info = AudioExportInfo(output_tracks=[settings])
@@ -472,6 +488,7 @@ def test_vorbis_passthru():
     # partial file i.e. suffix
     cutpoints = [15, file_duration]
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
     assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
@@ -492,6 +509,7 @@ def test_mp3_passthru():
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [file_duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
     export_info = AudioExportInfo(output_tracks=[settings])
@@ -506,6 +524,7 @@ def test_mp3_passthru():
 
     cutpoints = [15, file_duration]
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, suffix_output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(suffix_output_path)
     assert suffix_container.duration > 14.8 and suffix_container.duration < 15.1
@@ -670,7 +689,7 @@ def test_seeking():
     output_path = test_seeking.__name__ + '.mkv'
 
     source = MediaContainer(in_file)
-    segments = [(590, 600)]
+    segments = to_fraction_segments([(590, 600)])
 
     smart_cut(source, segments, output_path, log_level='warning')
 
@@ -838,7 +857,7 @@ def test_ts_h264_to_mp4_cut_on_keyframes():
         log_level='warning'
     )
 
-    with av.open(output_filename) as container:
+    with av_open(output_filename) as container:
         assert 'mp4' in container.format.name, f"Expected MP4 container, got {container.format.name}"
         video_streams = [stream for stream in container.streams if stream.type == 'video']
         assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
@@ -847,7 +866,9 @@ def test_ts_h264_to_mp4_cut_on_keyframes():
 
     result = MediaContainer(output_filename)
     assert len(result.video_frame_times) > 0, "Remuxed output should contain video frames"
-    assert result.video_stream.codec_context.codec_tag == 'avc1', "MP4 remux should use avc1 codec tag"
+    result_video_stream = result.video_stream
+    assert result_video_stream is not None, "Expected video stream in result container"
+    assert result_video_stream.codec_context.codec_tag == 'avc1', "MP4 remux should use avc1 codec tag"
 
 
 def test_ts_h264_to_mp4_smart_cut():
@@ -901,7 +922,7 @@ def test_ts_h264_to_mp4_smart_cut():
     )
 
     # Validate MP4 container and codec
-    with av.open(smartcut_output) as c:
+    with av_open(smartcut_output) as c:
         assert 'mp4' in c.format.name, f"Expected MP4 container, got {c.format.name}"
         vstreams = [s for s in c.streams if s.type == 'video']
         assert len(vstreams) == 1, f"Expected 1 video stream, found {len(vstreams)}"
@@ -951,7 +972,7 @@ def test_ts_h265_to_mp4_smart_cut():
         log_level='warning'
     )
 
-    with av.open(smartcut_output) as container:
+    with av_open(smartcut_output) as container:
         assert 'mp4' in container.format.name, f"Expected MP4 container, got {container.format.name}"
         video_streams = [stream for stream in container.streams if stream.type == 'video']
         assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
@@ -1003,7 +1024,7 @@ def test_ts_h264_to_mkv_smart_cut():
         log_level='warning'
     )
 
-    with av.open(smartcut_output) as container:
+    with av_open(smartcut_output) as container:
         assert 'matroska' in container.format.name, f"Expected MKV container, got {container.format.name}"
         video_streams = [s for s in container.streams if s.type == 'video']
         assert len(video_streams) == 1, f"Expected 1 video stream, found {len(video_streams)}"
@@ -1103,10 +1124,10 @@ def test_subtitle_disposition_preservation():
     source = MediaContainer(input_path)
 
     # Verify the source has the expected subtitle with forced flag
-    with av.open(input_path) as container:
+    with av_open(input_path) as container:
         assert len(container.streams.subtitles) == 1, "Source should have exactly 1 subtitle stream"
         sub_stream = container.streams.subtitles[0]
-        assert av.stream.Disposition.forced in sub_stream.disposition, \
+        assert Disposition.forced in sub_stream.disposition, \
             f"Source subtitle should have forced flag, got: {sub_stream.disposition}"
 
     # Run smart_cut with a simple segment
@@ -1169,12 +1190,12 @@ Loppu
     output_path = test_multiple_language_subtitles.__name__ + '.mkv'
 
     # Verify source has both subtitle tracks
-    with av.open(input_path) as container:
+    with av_open(input_path) as container:
         assert len(container.streams.subtitles) == 2, f"Source should have 2 subtitle streams, got {len(container.streams.subtitles)}"
 
         # Check English subtitle (first stream)
         en_sub = container.streams.subtitles[0]
-        assert av.stream.Disposition.default in en_sub.disposition, \
+        assert Disposition.default in en_sub.disposition, \
             f"English subtitle should have default flag, got: {en_sub.disposition}"
 
         # Check Finnish subtitle (second stream)
@@ -1188,14 +1209,14 @@ Loppu
     smart_cut(source, segments, output_path, log_level='warning')
 
     # Verify both subtitle tracks are preserved with correct dispositions
-    with av.open(output_path) as container:
+    with av_open(output_path) as container:
         assert len(container.streams.subtitles) == 2, f"Output should have 2 subtitle streams, got {len(container.streams.subtitles)}"
 
         en_sub_out = container.streams.subtitles[0]
         fi_sub_out = container.streams.subtitles[1]
 
         # Check that dispositions are preserved
-        assert av.stream.Disposition.default in en_sub_out.disposition, \
+        assert Disposition.default in en_sub_out.disposition, \
             f"English subtitle disposition not preserved: {en_sub_out.disposition}"
         assert fi_sub_out.disposition.value == 0, \
             f"Finnish subtitle disposition not preserved: {fi_sub_out.disposition}"

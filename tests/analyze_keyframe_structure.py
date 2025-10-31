@@ -8,7 +8,8 @@ import os
 import sys
 from pathlib import Path
 
-import av
+from av import open as av_open
+from av import time_base as AV_TIME_BASE
 
 from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
 
@@ -20,7 +21,7 @@ def analyze_keyframes_structure(input_path):
     try:
 
         # Open file directly to analyze all keyframes
-        av_container = av.open(input_path, 'r', metadata_errors='ignore')
+        av_container = av_open(input_path, 'r', metadata_errors='ignore')
         video_stream = None
 
         if len(av_container.streams.video) == 0:
@@ -35,7 +36,7 @@ def analyze_keyframes_structure(input_path):
 
         # Basic video info
         ctx = video_stream.codec_context
-        duration = float(av_container.duration / av.time_base)
+        duration = float(av_container.duration / AV_TIME_BASE)
 
         print("Video info:")
         print(f"  Codec: {ctx.name}")

@@ -1,18 +1,35 @@
 import os
 import platform
+from collections.abc import Iterable
 from fractions import Fraction
 
-import av
 import numpy as np
 import requests
 import scipy.signal
 import soundfile as sf
+from av import AudioFrame, VideoFrame
+from av import open as av_open
+from av import time_base as AV_TIME_BASE
+from av.stream import Disposition
 
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
 from smartcut.media_container import AudioTrack, MediaContainer
 from smartcut.misc_data import MixInfo
 
 import ffmpeg
+
+
+def _ensure_fraction(value: Fraction | int | float) -> Fraction:
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, float):
+        return Fraction(value).limit_denominator(1_000_000)
+    return Fraction(value)
+
+
+def to_fraction_segments(segments: Iterable[tuple[Fraction | int | float, Fraction | int | float]]) -> list[tuple[Fraction, Fraction]]:
+    """Normalize segment boundaries to Fractions for type checking."""
+    return [(_ensure_fraction(start), _ensure_fraction(end)) for start, end in segments]
 
 def cached_download(url: str, name: str) -> str:
     if os.path.exists(name):
@@ -51,7 +68,7 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
         return
     total_frames = target_duration * fps
 
-    container = av.open(path, mode="w")
+    container = av_open(path, mode="w")
 
     x265_options.append('log_level=warning')
     options = {'x265-params': ':'.join(x265_options)}
@@ -68,7 +85,7 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
         c = color_at_time(frame_i / fps)
         img[:, :] = c
 
-        frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+        frame = VideoFrame.from_ndarray(img, format="rgb24")
         for packet in stream.encode(frame):
             container.mux(packet)
 
@@ -78,11 +95,11 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
     container.close()
 
 def av_write_ogg(path, wave, sample_rate):
-    with av.open(path, 'w') as out:
+    with av_open(path, 'w') as out:
         s = out.add_stream('libvorbis', sample_rate, layout='mono')
         wave = wave.astype(np.float32)
         wave = np.expand_dims(wave, 0)
-        frame = av.AudioFrame.from_ndarray(wave, format='fltp', layout='mono')
+        frame = AudioFrame.from_ndarray(wave, format='fltp', layout='mono')
         frame.sample_rate = sample_rate
         frame.pts = 0
         packets = []
@@ -121,7 +138,7 @@ def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
     decoded: list[np.ndarray] = []
     sample_rate = None
 
-    with av.open(track.path, 'r', metadata_errors='ignore') as container:
+    with av_open(track.path, 'r', metadata_errors='ignore') as container:
         stream = container.streams.audio[track.index]
         stream.codec_context.thread_type = "FRAME"
 
@@ -279,8 +296,12 @@ def _infer_frame_count_anomaly(source_times, result_times):
 
 
 def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance = 20, allow_failed_frames = 0):
-    assert source_container.video_stream.width == result_container.video_stream.width
-    assert source_container.video_stream.height == result_container.video_stream.height
+    source_stream = source_container.video_stream
+    result_stream = result_container.video_stream
+    assert source_stream is not None, "Source container is missing a video stream"
+    assert result_stream is not None, "Result container is missing a video stream"
+    assert source_stream.width == result_stream.width
+    assert source_stream.height == result_stream.height
     if len(result_container.video_frame_times) != len(source_container.video_frame_times):
         # Provide a concise, output-focused gap report with local PTS context
         s = source_container.video_frame_times
@@ -328,7 +349,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
     failed_frames = 0
-    with av.open(source_container.path, mode='r') as source_av, av.open(result_container.path, mode='r') as result_av:
+    with av_open(source_container.path, mode='r') as source_av, av_open(result_container.path, mode='r') as result_av:
         for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
             source_numpy = source_frame.to_ndarray(format='rgb24')
             result_numpy = result_frame.to_ndarray(format='rgb24')
@@ -360,14 +381,18 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
     end_time = start_time + duration
 
     # Basic structure checks
-    assert source_container.video_stream.width == result_container.video_stream.width
-    assert source_container.video_stream.height == result_container.video_stream.height
+    source_stream = source_container.video_stream
+    result_stream = result_container.video_stream
+    assert source_stream is not None, "Source container is missing a video stream"
+    assert result_stream is not None, "Result container is missing a video stream"
+    assert source_stream.width == result_stream.width
+    assert source_stream.height == result_stream.height
 
     frames_checked = 0
-    with av.open(source_container.path, mode='r') as source_av, av.open(result_container.path, mode='r') as result_av:
+    with av_open(source_container.path, mode='r') as source_av, av_open(result_container.path, mode='r') as result_av:
         # Seek to start time
-        source_av.seek(int(start_time * av.time_base))
-        result_av.seek(int(start_time * av.time_base))
+        source_av.seek(int(start_time * AV_TIME_BASE))
+        result_av.seek(int(start_time * AV_TIME_BASE))
 
         source_decoder = source_av.decode(video=0)
         result_decoder = result_av.decode(video=0)
@@ -401,6 +426,10 @@ def run_cut_on_keyframes_test(input_path, output_path):
     cutpoints = source.gop_start_times_pts_s + [source.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
+    segments = to_fraction_segments(segments)
+    segments = to_fraction_segments(segments)
+    segments = to_fraction_segments(segments)
 
     segments = make_adjusted_segment_times(segments, source)
 
@@ -421,6 +450,7 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
     cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration + 1]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
 
     if audio_export_info == 'auto':
         s = AudioExportSettings(codec='passthru')
@@ -439,6 +469,7 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
     export_info = AudioExportInfo(output_tracks=[settings])
@@ -544,9 +575,11 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
     smartcut_output = output_base_name + "_smartcut" + os.path.splitext(input_path)[1]
     recode_output = output_base_name + "_recode" + os.path.splitext(input_path)[1]
 
+    fraction_segments = to_fraction_segments(segments)
+
     # Test 1: Smart cut (default mode) - merges all segments into one file
     smart_cut_settings = video_settings or VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
-    smart_cut(source, segments, smartcut_output,
+    smart_cut(source, fraction_segments, smartcut_output,
              audio_export_info=audio_export_info,
              video_settings=smart_cut_settings,
              log_level='warning')
@@ -556,7 +589,7 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
         recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override=recode_codec_override)
     else:
         recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
-    smart_cut(source, segments, recode_output,
+    smart_cut(source, fraction_segments, recode_output,
              audio_export_info=audio_export_info,
              video_settings=recode_settings,
              log_level='warning')
@@ -574,7 +607,7 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
 
 def check_stream_dispositions(source_path, output_path):
     """Helper function to verify that stream dispositions are preserved"""
-    with av.open(source_path) as source_container, av.open(output_path) as output_container:
+    with av_open(source_path) as source_container, av_open(output_path) as output_container:
         # Check video stream disposition if it exists
         if source_container.streams.video:
             src_video = source_container.streams.video[0]
@@ -597,8 +630,8 @@ def check_stream_dispositions(source_path, output_path):
                     f"Subtitle stream {i} disposition mismatch: {src_sub.disposition} vs {out_sub.disposition}"
 
             # Specifically check for forced flag preservation
-            src_forced = av.stream.Disposition.forced in src_sub.disposition
-            out_forced = av.stream.Disposition.forced in out_sub.disposition
+            src_forced = Disposition.forced in src_sub.disposition
+            out_forced = Disposition.forced in out_sub.disposition
             assert src_forced == out_forced, \
                     f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
 
@@ -718,7 +751,7 @@ def get_attachment_stream_metadata(path):
       - 'data': raw attachment bytes
     """
     attachments = []
-    with av.open(path) as container:
+    with av_open(path) as container:
         # Use the dedicated attachments accessor; matches PyAV's own tests
         for att in container.streams.attachments:
             # For MKV, PyAV exposes name/mimetype/data directly
