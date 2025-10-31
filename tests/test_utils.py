@@ -12,6 +12,8 @@ from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExport
 from smartcut.media_container import AudioTrack, MediaContainer
 from smartcut.misc_data import MixInfo
 
+import ffmpeg
+
 def cached_download(url: str, name: str) -> str:
     if os.path.exists(name):
         return name
@@ -160,12 +162,6 @@ def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
 
     audio = np.concatenate(decoded, axis=1)
     return audio, sample_rate or fallback_rate
-
-def assert_silence(track: AudioTrack):
-    y_orig, _ = read_track_audio(track)
-
-    sum = np.sum(np.abs(y_orig))
-    assert sum < 0.3, f"Content should be silence, but wave sum is {sum}"
 
 def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_threshold=0.07):
     y_orig, _ = read_track_audio(track_orig)
@@ -602,3 +598,213 @@ def check_stream_dispositions(source_path, output_path):
             out_forced = av.stream.Disposition.forced in out_sub.disposition
             assert src_forced == out_forced, \
                     f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
+
+
+def make_video_and_audio_mkv(path, file_duration):
+
+    audio_file_440 = 'tmp_440.ogg'
+    # audio_file_440 = 'tmp_440.aac'
+    generate_sine_wave(file_duration, audio_file_440, frequency=440)
+
+    audio_file_630 = 'tmp_630.ogg'
+    # audio_file_630 = 'tmp_630.aac'
+    generate_sine_wave(file_duration, audio_file_630, frequency=630)
+
+    tmp_video = 'tmp_video.mkv'
+    create_test_video(tmp_video, file_duration, 'h264', 'yuv420p', 30, (32, 18))
+
+    (
+        ffmpeg
+        .input(tmp_video)
+        .output(ffmpeg.input(audio_file_440), ffmpeg.input(audio_file_630),
+                path, vcodec='copy', acodec='aac', audio_bitrate=92_000, y=None)
+        .run(quiet=True)
+    )
+
+def make_video_with_subtitles(path, file_duration, subtitle_configs):
+    """
+    Create a video with multiple subtitle tracks.
+
+    Args:
+        path: Output file path
+        file_duration: Duration in seconds
+        subtitle_configs: List of dicts with keys:
+            - 'content': SRT content string
+            - 'language': Language code (e.g., 'en', 'fi')
+            - 'disposition': Disposition string (e.g., 'forced+default', 'default', '')
+            - 'temp_file': Temporary SRT file path
+    """
+    if os.path.exists(path):
+        return path
+
+    # Create base video
+    tmp_video = 'tmp_video_for_sub.mkv'
+    create_test_video(tmp_video, file_duration, 'h264', 'yuv420p', 30, (32, 18))
+
+    # Create subtitle files
+    subtitle_inputs = []
+    for config in subtitle_configs:
+        with open(config['temp_file'], 'w', encoding='utf-8') as f:
+            f.write(config['content'])
+        subtitle_inputs.append(ffmpeg.input(config['temp_file']))
+
+    # Build ffmpeg command
+    video_input = ffmpeg.input(tmp_video)
+
+    # Prepare output options
+    output_options = {
+        'vcodec': 'copy',
+        'scodec': 'subrip',
+        'y': None
+    }
+
+    # Add disposition and language options for each subtitle stream
+    for i, config in enumerate(subtitle_configs):
+        if config.get('disposition'):
+            output_options[f'disposition:s:{i}'] = config['disposition']
+        if config.get('language'):
+            output_options[f'metadata:s:s:{i}'] = f'language={config["language"]}'
+
+    # Run ffmpeg command with proper input structure
+    all_inputs = [video_input] + subtitle_inputs
+    (
+        ffmpeg
+        .output(*all_inputs, path, **output_options)
+        .run(quiet=True)
+    )
+
+    return path
+
+def make_video_with_attachment(path, file_duration=3,
+                               attachment_filename='smartcut_attachment.txt',
+                               attachment_payload=b'SmartCutAttachmentTest'):
+    """Create a small MKV file that carries a single attachment stream."""
+    if os.path.exists(path):
+        return path
+
+    base_video = 'tmp_attachment_base.mkv'
+    create_test_video(base_video, file_duration, 'h264', 'yuv420p', 25, (32, 18))
+
+    attachment_path = 'tmp_attachment_payload.bin'
+    with open(attachment_path, 'wb') as fh:
+        fh.write(attachment_payload)
+
+    output_options = {
+        'c': 'copy',
+        'attach': attachment_path,
+        'metadata:s:t': f'filename={attachment_filename}',
+        'metadata:s:t:0': 'mimetype=text/plain',
+        'y': None,
+    }
+
+    (
+        ffmpeg
+        .output(ffmpeg.input(base_video), path, **output_options)
+        .run(quiet=True)
+    )
+
+    return path
+
+def get_attachment_stream_metadata(path):
+    """Extract attachment metadata and raw bytes using PyAV.
+
+    Returns a list of dicts with keys:
+      - 'filename': attachment filename (if present)
+      - 'mimetype': attachment mimetype (if present)
+      - 'extradata_size': size of raw data
+      - 'data': raw attachment bytes
+    """
+    attachments = []
+    with av.open(path) as container:
+        # Use the dedicated attachments accessor; matches PyAV's own tests
+        for att in container.streams.attachments:
+            # For MKV, PyAV exposes name/mimetype/data directly
+            name = getattr(att, 'name', None)
+            mimetype = getattr(att, 'mimetype', None)
+            data_bytes = getattr(att, 'data', None)
+
+            # Also pick filename/mimetype from metadata if present
+            md = dict(getattr(att, 'metadata', {}) or {})
+            filename = name or md.get('filename')
+            mimetype = mimetype or md.get('mimetype')
+
+            attachments.append({
+                'filename': filename,
+                'mimetype': mimetype,
+                'extradata_size': (len(data_bytes) if data_bytes is not None else None),
+                'data': data_bytes,
+            })
+
+    attachments.sort(key=lambda info: info.get('filename') or '')
+    return attachments
+
+def make_video_with_forced_subtitle(path, file_duration):
+    """Legacy function - creates video with single forced subtitle for backward compatibility"""
+    subtitle_content = """1
+00:00:01,000 --> 00:00:03,000
+First subtitle entry
+
+2
+00:00:05,000 --> 00:00:07,000
+Second forced subtitle
+
+3
+00:00:08,500 --> 00:00:09,500
+Final entry
+"""
+
+    subtitle_configs = [{
+        'content': subtitle_content,
+        'language': 'en',
+        'disposition': 'forced+default',
+        'temp_file': 'tmp_test_subtitle_forced.srt'
+    }]
+
+    return make_video_with_subtitles(path, file_duration, subtitle_configs)
+
+def get_tears_of_steel_annexb():
+    """
+    Get Tears of Steel in Annex B format (TS container) for testing H.264 NAL parsing.
+    Converts from MP4 to TS to force Annex B NAL format.
+    """
+    mp4_filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
+    ts_filename = 'google_tears_of_steel_annexb.ts'
+
+    if not os.path.exists(ts_filename):
+        # Convert first ~200 seconds to TS format (covers our problematic non-IDR keyframes)
+        import subprocess
+        result = subprocess.run([
+            'ffmpeg', '-i', mp4_filename,
+            '-t', '200',  # First 200 seconds (covers 18.5s, 143.4s, 183.3s non-IDR frames)
+            '-c', 'copy',  # Stream copy to preserve exact H.264 stream
+            '-f', 'mpegts',  # Force MPEG-TS output (uses Annex B)
+            '-y', ts_filename
+        ], check=False, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to convert to TS format: {result.stderr}")
+
+    return ts_filename
+
+
+def get_testvideos_jellyfish_h265_ts():
+    """Fetch Jellyfish HEVC sample and convert it to Annex B in an MPEG-TS container."""
+    mp4_filename = cached_download(
+        'https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4',
+        'testvideos_jellyfish_h265.mp4'
+    )
+    ts_filename = 'testvideos_jellyfish_h265.ts'
+
+    if not os.path.exists(ts_filename):
+        import subprocess
+        result = subprocess.run([
+            'ffmpeg', '-i', mp4_filename,
+            '-c', 'copy',
+            '-f', 'mpegts',
+            '-y', ts_filename
+        ], check=False, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to convert HEVC sample to TS format: {result.stderr}")
+
+    return ts_filename

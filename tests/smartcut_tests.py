@@ -37,7 +37,7 @@ data_dir = 'test_data'
 # Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description='Smart Media Cutter Tests')
-    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all', 'smc_audio', 'smc_mixed'],
+    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all'],
                        help='Run tests from specific category')
     parser.add_argument('--single', type=str, help='Run a single specific test function (e.g., test_h264_non_idr_keyframes)')
     parser.add_argument('--list-categories', action='store_true', help='List available test categories')
@@ -191,7 +191,7 @@ def test_peaks_mkv_memory_usage():
 
     # Download peaks.mkv using cached_download utility
     url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/peaks.mkv"
-    peaks_path = cached_download(url, os.path.join(data_dir, "peaks.mkv"))
+    peaks_path = cached_download(url, "peaks.mkv")
 
     # Test GOP detection
     container = MediaContainer(peaks_path)
@@ -478,73 +478,6 @@ def test_vorbis_passthru():
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
-def test_vorbis_track_cut():
-    filename = 'basic.ogg'
-    freq = 440
-
-    file_duration = 30
-    generate_sine_wave(file_duration, filename, frequency=freq)
-    output_path = test_vorbis_track_cut.__name__ + '.ogg'
-
-    n_cuts = 10
-    source_container = MediaContainer(filename)
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    settings = AudioExportSettings(codec='libvorbis', channels = 'mono', bitrate=64000, sample_rate=44100)
-    export_info = AudioExportInfo(output_tracks=[settings])
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
-
-    # partial file i.e. suffix
-    cutpoints = [15, file_duration]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-    suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
-     # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    assert suffix_container.audio_tracks[0].packets[0].pts < 1000
-
-def test_mp3_track_cut():
-    filename = 'basic.mp3'
-    freq = 440
-
-    file_duration = 30
-    generate_sine_wave(file_duration, filename, frequency=freq)
-    output_path = test_mp3_track_cut.__name__ + '.mp3'
-
-    n_cuts = 10
-    source_container = MediaContainer(filename)
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    settings = AudioExportSettings(codec='mp3', channels = 'mono', bitrate=128000, sample_rate=44100)
-    export_info = AudioExportInfo(output_tracks=[settings])
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    # NOTE: mp3 output has a timing issue at the beginning that I can't be arsed to fix.
-    # Namely, the mp3 encoder adds some silence to the beginning (encoder delay).
-    # Therefore we loosen the rms threshold so the mp3 test pass
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0], rms_threshold=0.15)
-
-    # partial file i.e. suffix
-    cutpoints = [15, file_duration]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-    suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
-     # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    assert suffix_container.audio_tracks[0].packets[0].pts < 1000
-
 def test_mp3_passthru():
     filename = 'basic.mp3'
     freq = 440
@@ -579,273 +512,6 @@ def test_mp3_passthru():
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
-
-def test_vorbis_encode_mix():
-    filename = 'basic.ogg'
-    freq = 440
-
-    file_duration = 30
-    generate_sine_wave(file_duration, filename, frequency=freq)
-    output_path = test_vorbis_encode_mix.__name__ + '.ogg'
-
-    n_cuts = 10
-    source_container = MediaContainer(filename)
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    mix = MixInfo([1.])
-    settings = AudioExportSettings(codec='libvorbis', channels = 'mono', bitrate=64000, sample_rate=44100)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
-
-def test_flac_conversions():
-    filename = 'basic.ogg'
-    freq = 440
-
-    file_duration = 30
-    generate_sine_wave(file_duration, filename, frequency=freq)
-    output_path = test_flac_conversions.__name__ + '.flac'
-
-    n_cuts = 10
-    source_container = MediaContainer(filename)
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    mix = MixInfo([1.])
-    settings = AudioExportSettings(codec='flac', channels = 'mono', sample_rate=44_100, bitrate=64_000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
-
-    ogg_output_path = test_flac_conversions.__name__ + '.ogg'
-
-    mix = MixInfo([1.])
-    settings = AudioExportSettings(codec='libvorbis', channels = 'mono', sample_rate=44_100, bitrate=64_000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(output_container, segments, ogg_output_path, audio_export_info=export_info)
-
-    vorbis_output_container = MediaContainer(ogg_output_path)
-    compare_tracks(source_container.audio_tracks[0], vorbis_output_container.audio_tracks[0], rms_threshold=0.075)
-
-def test_wav_conversions():
-    filename = 'basic.ogg'
-    freq = 440
-
-    file_duration = 30
-    generate_sine_wave(file_duration, filename, frequency=freq)
-    output_path = test_wav_conversions.__name__ + '.wav'
-
-    n_cuts = 10
-    source_container = MediaContainer(filename)
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    mix = MixInfo([1.])
-    settings = AudioExportSettings(codec='pcm_f32le', channels = 'mono', sample_rate=44_100, bitrate=64_000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0], rms_threshold=0.075)
-
-    settings = AudioExportSettings(codec='pcm_s16le', channels = 'mono', sample_rate=44_100, bitrate=64_000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0], rms_threshold=0.075)
-
-    # convert back to vorbis from s16
-    ogg_output_path = test_wav_conversions.__name__ + '.ogg'
-
-    settings = AudioExportSettings(codec='libvorbis', channels = 'mono', sample_rate=44_100, bitrate=64_000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(output_container, segments, ogg_output_path, audio_export_info=export_info)
-
-    ogg_output_container = MediaContainer(ogg_output_path)
-    # TODO: flaky rms test
-    compare_tracks(source_container.audio_tracks[0], ogg_output_container.audio_tracks[0], rms_threshold=0.15)
-
-
-def make_video_and_audio_mkv(path, file_duration):
-
-    audio_file_440 = 'tmp_440.ogg'
-    # audio_file_440 = 'tmp_440.aac'
-    generate_sine_wave(file_duration, audio_file_440, frequency=440)
-
-    audio_file_630 = 'tmp_630.ogg'
-    # audio_file_630 = 'tmp_630.aac'
-    generate_sine_wave(file_duration, audio_file_630, frequency=630)
-
-    tmp_video = 'tmp_video.mkv'
-    create_test_video(tmp_video, file_duration, 'h264', 'yuv420p', 30, (32, 18))
-
-    (
-        ffmpeg
-        .input(tmp_video)
-        .output(ffmpeg.input(audio_file_440), ffmpeg.input(audio_file_630),
-                path, vcodec='copy', acodec='aac', audio_bitrate=92_000, y=None)
-        .run(quiet=True)
-    )
-
-def make_video_with_subtitles(path, file_duration, subtitle_configs):
-    """
-    Create a video with multiple subtitle tracks.
-
-    Args:
-        path: Output file path
-        file_duration: Duration in seconds
-        subtitle_configs: List of dicts with keys:
-            - 'content': SRT content string
-            - 'language': Language code (e.g., 'en', 'fi')
-            - 'disposition': Disposition string (e.g., 'forced+default', 'default', '')
-            - 'temp_file': Temporary SRT file path
-    """
-    if os.path.exists(path):
-        return path
-
-    # Create base video
-    tmp_video = 'tmp_video_for_sub.mkv'
-    create_test_video(tmp_video, file_duration, 'h264', 'yuv420p', 30, (32, 18))
-
-    # Create subtitle files
-    subtitle_inputs = []
-    for config in subtitle_configs:
-        with open(config['temp_file'], 'w', encoding='utf-8') as f:
-            f.write(config['content'])
-        subtitle_inputs.append(ffmpeg.input(config['temp_file']))
-
-    # Build ffmpeg command
-    video_input = ffmpeg.input(tmp_video)
-
-    # Prepare output options
-    output_options = {
-        'vcodec': 'copy',
-        'scodec': 'subrip',
-        'y': None
-    }
-
-    # Add disposition and language options for each subtitle stream
-    for i, config in enumerate(subtitle_configs):
-        if config.get('disposition'):
-            output_options[f'disposition:s:{i}'] = config['disposition']
-        if config.get('language'):
-            output_options[f'metadata:s:s:{i}'] = f'language={config["language"]}'
-
-    # Run ffmpeg command with proper input structure
-    all_inputs = [video_input] + subtitle_inputs
-    (
-        ffmpeg
-        .output(*all_inputs, path, **output_options)
-        .run(quiet=True)
-    )
-
-    return path
-
-def make_video_with_attachment(path, file_duration=3,
-                               attachment_filename='smartcut_attachment.txt',
-                               attachment_payload=b'SmartCutAttachmentTest'):
-    """Create a small MKV file that carries a single attachment stream."""
-    if os.path.exists(path):
-        return path
-
-    base_video = 'tmp_attachment_base.mkv'
-    create_test_video(base_video, file_duration, 'h264', 'yuv420p', 25, (32, 18))
-
-    attachment_path = 'tmp_attachment_payload.bin'
-    with open(attachment_path, 'wb') as fh:
-        fh.write(attachment_payload)
-
-    output_options = {
-        'c': 'copy',
-        'attach': attachment_path,
-        'metadata:s:t': f'filename={attachment_filename}',
-        'metadata:s:t:0': 'mimetype=text/plain',
-        'y': None,
-    }
-
-    (
-        ffmpeg
-        .output(ffmpeg.input(base_video), path, **output_options)
-        .run(quiet=True)
-    )
-
-    return path
-
-def get_attachment_stream_metadata(path):
-    """Extract attachment metadata and raw bytes using PyAV.
-
-    Returns a list of dicts with keys:
-      - 'filename': attachment filename (if present)
-      - 'mimetype': attachment mimetype (if present)
-      - 'extradata_size': size of raw data
-      - 'data': raw attachment bytes
-    """
-    attachments = []
-    with av.open(path) as container:
-        # Use the dedicated attachments accessor; matches PyAV's own tests
-        for att in container.streams.attachments:
-            # For MKV, PyAV exposes name/mimetype/data directly
-            name = getattr(att, 'name', None)
-            mimetype = getattr(att, 'mimetype', None)
-            data_bytes = getattr(att, 'data', None)
-
-            # Also pick filename/mimetype from metadata if present
-            md = dict(getattr(att, 'metadata', {}) or {})
-            filename = name or md.get('filename')
-            mimetype = mimetype or md.get('mimetype')
-
-            attachments.append({
-                'filename': filename,
-                'mimetype': mimetype,
-                'extradata_size': (len(data_bytes) if data_bytes is not None else None),
-                'data': data_bytes,
-            })
-
-    attachments.sort(key=lambda info: info.get('filename') or '')
-    return attachments
-
-def make_video_with_forced_subtitle(path, file_duration):
-    """Legacy function - creates video with single forced subtitle for backward compatibility"""
-    subtitle_content = """1
-00:00:01,000 --> 00:00:03,000
-First subtitle entry
-
-2
-00:00:05,000 --> 00:00:07,000
-Second forced subtitle
-
-3
-00:00:08,500 --> 00:00:09,500
-Final entry
-"""
-
-    subtitle_configs = [{
-        'content': subtitle_content,
-        'language': 'en',
-        'disposition': 'forced+default',
-        'temp_file': 'tmp_test_subtitle_forced.srt'
-    }]
-
-    return make_video_with_subtitles(path, file_duration, subtitle_configs)
-
 def test_mkv_with_video_and_audio_passthru():
     file_duration = 30
 
@@ -875,151 +541,6 @@ def test_mkv_with_video_and_audio_passthru():
     run_smartcut_test(final_input, output_path, n_cuts=5, audio_export_info=export_info)
     result_container = MediaContainer(output_path)
     assert len(result_container.audio_tracks) == 1
-    compare_tracks(source_container.audio_tracks[0], result_container.audio_tracks[0])
-
-def test_mkv_with_video_and_audio_mix():
-    file_duration = 30
-
-    final_input = 'video_and_two_audio.mkv'
-    make_video_and_audio_mkv(final_input, file_duration)
-
-    output_path = test_mkv_with_video_and_audio_mix.__name__ + '.mkv'
-
-    source_container = MediaContainer(final_input)
-
-    mix = MixInfo([1., 0.])
-    mix_export_settings = AudioExportSettings(codec='aac', channels='mono', bitrate=92_000, sample_rate=44_100)
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    run_smartcut_test(final_input, output_path, n_cuts=5, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
-
-    assert len(result_container.audio_tracks) == 1
-    compare_tracks(source_container.audio_tracks[0], result_container.audio_tracks[0])
-
-    mix = MixInfo([0., 1.])
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    run_smartcut_test(final_input, output_path, n_cuts=5, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
-    assert len(result_container.audio_tracks) == 1
-    compare_tracks(source_container.audio_tracks[1], result_container.audio_tracks[0])
-
-    mix = MixInfo([0.5, 0.5])
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    run_smartcut_test(final_input, output_path, n_cuts=5, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
-    assert len(result_container.audio_tracks) == 1
-
-    reference_mix_path = 'reference_mix.ogg'
-    generate_double_sine_wave(file_duration, reference_mix_path, 440, 630)
-    reference_container = MediaContainer(reference_mix_path)
-    compare_tracks(reference_container.audio_tracks[0], result_container.audio_tracks[0], rms_threshold=0.7)
-
-def test_mix_with_rate_conversion():
-    in_1 = '48k.ogg'
-    freq_1 = 440
-    in_2 = '26k.ogg'
-    freq_2 = 600
-
-    out_sr = 44_100
-
-    file_duration = 30
-    generate_sine_wave(file_duration, in_1, frequency=freq_1, sample_rate=48_000)
-    generate_sine_wave(file_duration, in_2, frequency=freq_2, sample_rate=26_000)
-
-    output_path = test_mix_with_rate_conversion.__name__ + '.ogg'
-
-    n_cuts = 10
-    source_container = MediaContainer(in_1)
-    source_container.add_audio_file(in_2)
-
-    cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    mix = MixInfo([0.5, 0.5])
-    settings = AudioExportSettings(codec='libvorbis', channels = 'mono', bitrate=64000, sample_rate=out_sr)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    reference_mix_path = test_mix_with_rate_conversion.__name__ + '_reference_mix.ogg'
-    generate_double_sine_wave(file_duration, reference_mix_path, freq_1, freq_2, sample_rate=out_sr)
-    ref_container = MediaContainer(reference_mix_path)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(ref_container.audio_tracks[0], output_container.audio_tracks[0], rms_threshold=0.12)
-
-def test_denoiser():
-    out_sr = 48_000
-    test_sample_rates = [8_000, 16_000, 24_000, 36_000, 44_100, 48_000]
-    if platform.system() == 'Windows':
-        test_sample_rates = [36_000, 44_100, 48_000]
-    for sr in test_sample_rates:
-        in_file = f'denoiser_in_{sr}.ogg'
-        file_duration = 3
-        generate_sine_wave(file_duration, in_file, frequency=440, sample_rate=sr)
-
-        output_path = test_denoiser.__name__ + f'_{sr}.ogg'
-
-        n_cuts = 3
-        source_container = MediaContainer(in_file)
-
-        cutpoints = np.arange(file_duration*1000)[1:-1]
-        cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
-
-        segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-        mix = MixInfo([1.])
-        settings = AudioExportSettings(codec='libvorbis', channels = 'mono', bitrate=64000, sample_rate=out_sr, denoise=1)
-        export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-        smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-        output_container = MediaContainer(output_path)
-        assert len(output_container.audio_tracks) == 1
-
-    file_duration = 10
-
-    audio_file_440 = 'denoise_in_440.ogg'
-    generate_sine_wave(file_duration, audio_file_440, frequency=440, sample_rate=48_000)
-    audio_file_630 = 'denoise_in_630.ogg'
-    generate_sine_wave(file_duration, audio_file_630, frequency=630, sample_rate=48_000)
-
-    output_path = test_denoiser.__name__ + '.ogg'
-
-    source_container = MediaContainer(audio_file_440)
-    source_container.add_audio_file(audio_file_630)
-
-    mix = MixInfo([1., 1.])
-
-    segments = [(0, source_container.duration)]
-
-    # output denoise
-    mix_export_settings = AudioExportSettings(codec='libvorbis', channels='mono', bitrate=92_000, sample_rate=48_000, denoise=2)
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
-    assert_silence(result_container.audio_tracks[0])
-
-    # input 0 denoise
-    mix_export_settings = AudioExportSettings(codec='libvorbis', channels='mono', bitrate=92_000, sample_rate=48_000, denoise=0)
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[1], result_container.audio_tracks[0])
-
-    # input 1 denoise
-    mix_export_settings = AudioExportSettings(codec='libvorbis', channels='mono', bitrate=92_000, sample_rate=48_000, denoise=1)
-    export_info = AudioExportInfo(mix, mix_export_settings)
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    result_container = MediaContainer(output_path)
     compare_tracks(source_container.audio_tracks[0], result_container.audio_tracks[0])
 
 def test_vp9_smart_cut():
@@ -1175,8 +696,12 @@ def test_broken_ref_vid():
         run_smartcut_test(filename, output_path, n_cuts=c)
 
 def test_manual():
-    seed_all(12353)
-    test_google_subaru()
+    seed_all(1235)
+
+    filename = 'mpeg4.wmv'
+    create_test_video(filename, 30, 'mpeg4', 'yuv420p', 30, (32, 16))
+    output_path = test_wmv_smart_cut.__name__ + filename
+    run_smartcut_test(filename, output_path, n_cuts=2)
 
 # Real-world video tests using publicly available videos
 
@@ -1217,53 +742,6 @@ def test_google_tears_of_steel():
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
     output_base = test_google_tears_of_steel.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto', pixel_tolerance=30)
-
-def get_tears_of_steel_annexb():
-    """
-    Get Tears of Steel in Annex B format (TS container) for testing H.264 NAL parsing.
-    Converts from MP4 to TS to force Annex B NAL format.
-    """
-    mp4_filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
-    ts_filename = 'google_tears_of_steel_annexb.ts'
-
-    if not os.path.exists(ts_filename):
-        # Convert first ~200 seconds to TS format (covers our problematic non-IDR keyframes)
-        import subprocess
-        result = subprocess.run([
-            'ffmpeg', '-i', mp4_filename,
-            '-t', '200',  # First 200 seconds (covers 18.5s, 143.4s, 183.3s non-IDR frames)
-            '-c', 'copy',  # Stream copy to preserve exact H.264 stream
-            '-f', 'mpegts',  # Force MPEG-TS output (uses Annex B)
-            '-y', ts_filename
-        ], check=False, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to convert to TS format: {result.stderr}")
-
-    return ts_filename
-
-
-def get_testvideos_jellyfish_h265_ts():
-    """Fetch Jellyfish HEVC sample and convert it to Annex B in an MPEG-TS container."""
-    mp4_filename = cached_download(
-        'https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4',
-        'testvideos_jellyfish_h265.mp4'
-    )
-    ts_filename = 'testvideos_jellyfish_h265.ts'
-
-    if not os.path.exists(ts_filename):
-        import subprocess
-        result = subprocess.run([
-            'ffmpeg', '-i', mp4_filename,
-            '-c', 'copy',
-            '-f', 'mpegts',
-            '-y', ts_filename
-        ], check=False, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to convert HEVC sample to TS format: {result.stderr}")
-
-    return ts_filename
 
 def test_h264_non_idr_keyframes():
     """
@@ -1851,35 +1329,6 @@ def get_test_categories():
     real_world_categories = [key for key in test_categories if key.startswith('real_world_')]
     for category in real_world_categories:
         test_categories['real_world'].extend(test_categories[category])
-
-    # SMC-specific tests (require additional dependencies)
-    smc_tests = {
-        'smc_audio': [
-            test_vorbis_encode_mix,
-            test_flac_conversions,
-            test_wav_conversions,
-            test_vorbis_track_cut,
-            test_mp3_track_cut,
-        ],
-        'smc_mixed': [
-            test_mkv_with_video_and_audio_mix,
-            test_mix_with_rate_conversion,
-            test_denoiser,
-        ],
-    }
-
-    try:
-        # Audio mixing, etc, is omitted from the CLI version, because Librosa and some other libs add a lot of bloat to the binary
-        from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
-
-        # Add SMC tests to existing categories
-        for category, tests in smc_tests.items():
-            test_categories[category] = tests
-
-        print("Including smc tests")
-    except ImportError:
-        print("Skipping smc tests")
-        pass
 
     return test_categories
 

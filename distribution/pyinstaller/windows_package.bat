@@ -13,7 +13,7 @@ venv\Scripts\pyinstaller --distpath .\dist --workpath .\build ^
 
 REM Create zip archive of directory output
 REM Wait briefly to ensure file handles are released before zipping
-timeout /t 3 /nobreak >nul
+timeout /t 1 /nobreak >nul
 powershell -Command "Compress-Archive -Path '.\dist\smartcut' -DestinationPath '.\dist\smartcut_win.zip' -Force"
 
 REM ..\sign.bat .\dist\smartcut.exe
