@@ -22,7 +22,7 @@ AV_TIME_BASE: int = 1000000
 
 @dataclass
 class AudioTrack:
-    media_container: object
+    media_container: "MediaContainer"
     av_stream: AudioStream
     path: str
     index: int
@@ -36,7 +36,7 @@ class AudioTrack:
         return self.media_container.start_time
 
 class MediaContainer:
-    av_containers: list[InputContainer]
+    av_container: InputContainer
     video_stream: VideoStream | None
     path: str
 
@@ -60,9 +60,7 @@ class MediaContainer:
         frame_pts = []
         self.video_keyframe_indices = []
 
-        av_container = av_open(path, 'r', metadata_errors='ignore')
-        audio_loading_container = av_open(path, 'r', metadata_errors='ignore')
-        self.av_containers = [av_container, audio_loading_container]
+        self.av_container = av_container = av_open(path, 'r', metadata_errors='ignore')
 
         self.chat_url = None
         self.chat_history = None
@@ -91,12 +89,11 @@ class MediaContainer:
 
         self.audio_tracks = []
         stream_index_to_audio_track = {}
-        for i, (a_s, loading_s) in enumerate(zip(av_container.streams.audio, audio_loading_container.streams.audio)):
-            a_s.codec_context.thread_type = "FRAME"
-            loading_s.codec_context.thread_type = "FRAME"
-            track = AudioTrack(self, a_s, loading_s, path, i, i)
+        for i, audio_stream in enumerate(av_container.streams.audio):
+            audio_stream.codec_context.thread_type = "FRAME"
+            track = AudioTrack(self, audio_stream, path, i)
             self.audio_tracks.append(track)
-            stream_index_to_audio_track[a_s.index] = track
+            stream_index_to_audio_track[audio_stream.index] = track
 
         self.subtitle_tracks = []
         stream_index_to_subtitle_track = {}
@@ -157,82 +154,18 @@ class MediaContainer:
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
 
         if self.video_stream is not None:
-            self.gop_end_times_dts.append(last_seen_video_dts)
+            if last_seen_video_dts is not None:
+                self.gop_end_times_dts.append(last_seen_video_dts)
             self.video_frame_times = np.sort(np.array(frame_pts)) * self.video_stream.time_base
 
             self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
-
-            # Post-process: Fill in actual picture NAL types for HEVC parameter sets
-            self._fill_hevc_picture_nal_types()
 
         for t in self.audio_tracks:
             frame_times = np.array(t.frame_times)
             t.frame_times = frame_times * t.av_stream.time_base
 
-    def _fill_hevc_picture_nal_types(self):
-        """
-        Post-process to fill in actual picture NAL types for HEVC GOPs that start with parameter sets.
-        This does a second pass to look ahead after parameter sets to find the actual picture frames.
-        """
-        if not self.video_stream or self.video_stream.codec_context.name != 'hevc':
-            return
-
-        # Find indices that need to be filled (-1 placeholders)
-        indices_to_fill = [i for i, nal_type in enumerate(self.gop_start_nal_types) if nal_type == -1]
-
-        if not indices_to_fill:
-            return  # Nothing to fill
-
-        # Open a new container for the second pass
-        av_container = av_open(self.path, 'r', metadata_errors='ignore')
-        video_stream = av_container.streams.video[0]
-
-        try:
-            # Process sequentially through all keyframes, not just the target ones
-            keyframe_index = 0
-            indices_to_fill_set = set(indices_to_fill)
-            looking_for_picture = False
-            found_keyframes = 0
-            found_pictures = 0
-
-            for packet in av_container.demux(video_stream):
-                if packet.pts is None or packet.stream.type != 'video':
-                    continue
-
-                # Check if this is a keyframe
-                if packet.is_keyframe:
-                    # Check if this keyframe corresponds to one we need to process
-                    if keyframe_index in indices_to_fill_set:
-                        # This is a parameter set keyframe that needs look-ahead
-                        looking_for_picture = True
-                        found_keyframes += 1
-                    keyframe_index += 1
-                    continue
-
-                # If we're looking for a picture frame and found one
-                if looking_for_picture and packet.stream.type == 'video':
-                    nal_type = get_h265_nal_unit_type(bytes(packet))
-                    if nal_type is not None and nal_type <= 21:  # All picture frames (0-21)
-                        # Found the picture frame, record its NAL type
-                        # Find which index in indices_to_fill this corresponds to
-                        current_keyframe_idx = keyframe_index - 1  # We just processed this keyframe
-                        if current_keyframe_idx in indices_to_fill_set:
-                            # Find position in indices_to_fill list
-                            list_position = indices_to_fill.index(current_keyframe_idx)
-                            self.gop_start_nal_types[current_keyframe_idx] = nal_type
-                            found_pictures += 1
-
-                        looking_for_picture = False
-
-                        if found_pictures >= len(indices_to_fill):
-                            break  # All done
-
-        finally:
-            av_container.close()
-
     def close(self):
-        for c in self.av_containers:
-            c.close()
+        self.av_container.close()
 
     def get_next_frame_time(self, t):
         t += self.start_time

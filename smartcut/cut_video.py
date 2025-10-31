@@ -154,7 +154,7 @@ class SubtitleCutter:
         self.track_i = subtitle_track_index
         self.packets = media_container.subtitle_tracks[subtitle_track_index]
 
-        self.in_stream = media_container.av_containers[0].streams.subtitles[subtitle_track_index]
+        self.in_stream = media_container.av_container.streams.subtitles[subtitle_track_index]
         self.out_stream = output_av_container.add_stream_from_template(self.in_stream)
         self.out_stream.metadata.update(self.in_stream.metadata)
         self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
@@ -823,7 +823,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             if supports_attachments:
                 # Copy attachment streams from the primary input container
-                for in_stream in media_container.av_containers[0].streams:
+                for in_stream in media_container.av_container.streams:
                     if getattr(in_stream, "type", None) != "attachment":
                         continue
 

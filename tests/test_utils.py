@@ -317,8 +317,8 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     # But the difficulty is that we can't control the output stream time_base.
     # We have to just accept the value that av/ffmpeg gives us. So sometimes the
     # input and output timebases are not multiples of each other.
-    is_mpeg = source_container.av_containers[0].format.name in ['mpegts', 'mpegvideo']
-    is_avi = source_container.av_containers[0].format.name == 'avi'
+    is_mpeg = source_container.av_container.format.name in ['mpegts', 'mpegvideo']
+    is_avi = source_container.av_container.format.name == 'avi'
     diff_tolerance = Fraction(3, 1000)
     if is_mpeg:
         diff_tolerance = 2
