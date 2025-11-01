@@ -2,8 +2,9 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 import numpy as np
-from av import AudioStream, Packet, VideoStream, time_base as AV_TIME_BASE
+from av import AudioStream, Packet, VideoStream
 from av import open as av_open
+from av import time_base as AV_TIME_BASE
 from av.container.input import InputContainer
 from av.stream import Stream
 
