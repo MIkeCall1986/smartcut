@@ -190,6 +190,16 @@ def test_h265_smart_cut_large():
     for c in [1, 2, 5]:
         run_smartcut_test(input_file, output_path, c)
 
+def test_mkv_with_invalid_timestamps():
+    """Test cutting anime_clip.mkv which has invalid timestamps."""
+    url = "https://github.com/skeskinen/media-test-data/raw/refs/heads/main/anime_clip.mkv"
+    anime_path = cached_download(url, "anime_clip.mkv")
+
+    output_path = test_mkv_with_invalid_timestamps.__name__ + '.mkv'
+
+    # Run normal smartcut test with a few cuts
+    run_smartcut_test(anime_path, output_path, n_cuts=2, audio_export_info='auto')
+
 def test_peaks_mkv_memory_usage():
     """Test that peaks.mkv doesn't cause excessive memory usage and has proper GOP detection."""
     import psutil
@@ -1373,6 +1383,7 @@ def get_test_categories():
             # test-videos.co.uk H.264 samples
             test_testvideos_bigbuckbunny_h264,
             test_testvideos_jellyfish_h264,
+            test_mkv_with_invalid_timestamps,
         ],
 
         'real_world_h265': [
@@ -1495,7 +1506,7 @@ def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
                 else:
                     print(f"{test_name}: ✅ PASS")
                 passed += 1
-            except Exception as e:
+            except Exception:
                 if flaky_runs:
                     print(f"{test_name} [{run_index + 1}/{total_runs}] seed={run_seed}: ❌ FAIL")
                 else:

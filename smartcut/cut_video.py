@@ -436,6 +436,29 @@ class VideoCutter:
             self.encoding_options['x265-params'] = ':'.join(x265_params)
 
 
+    def _fix_packet_timestamps(self, packet: Packet) -> None:
+        """Fix packet DTS/PTS to ensure monotonic increase and PTS >= DTS."""
+        packet.stream = self.out_stream
+        packet.time_base = self.out_time_base
+        if packet.dts is not None:
+            if packet.dts <= self.last_dts:
+                packet.dts = self.last_dts + 1
+                # Ensure PTS >= DTS (required by all container formats)
+                if packet.pts is not None and packet.pts < packet.dts:
+                    packet.pts = packet.dts
+            self.last_dts = packet.dts
+        else:
+            # When DTS is None, use PTS as fallback (common for keyframes without B-frame reordering)
+            # Ensure we don't use the sentinel value to avoid extremely negative DTS
+            pts_value = packet.pts if packet.pts is not None else 0
+            if self.last_dts < 0:
+                # First packet with None DTS, use PTS
+                packet.dts = pts_value
+            else:
+                # Subsequent packets, ensure monotonic increase
+                packet.dts = max(pts_value, self.last_dts + 1)
+            self.last_dts = packet.dts
+
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
         if cut_segment.require_recode:
             packets = self.recode_segment(cut_segment)
@@ -449,29 +472,13 @@ class VideoCutter:
         self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
 
         for packet in packets:
-            packet.stream = self.out_stream
-            packet.time_base = self.out_time_base
-            if packet.dts is not None:
-                if packet.dts <= self.last_dts:
-                    packet.dts = self.last_dts + 1
-                self.last_dts = packet.dts
-            else:
-                packet.dts = self.last_dts + 1
-                self.last_dts = packet.dts
+            self._fix_packet_timestamps(packet)
         return packets
 
     def finish(self):
         packets = self.flush_encoder()
         for packet in packets:
-            packet.stream = self.out_stream
-            packet.time_base = self.out_time_base
-            if packet.dts is not None:
-                if packet.dts <= self.last_dts:
-                    packet.dts = self.last_dts + 1
-                self.last_dts = packet.dts
-            else:
-                packet.dts = self.last_dts + 1
-                self.last_dts = packet.dts
+            self._fix_packet_timestamps(packet)
 
         self.input_av_container.close()
 
