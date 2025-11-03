@@ -195,6 +195,10 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.5
+* Better handling of inputs where DTS is missing.
+* Code cleanups to get clean pyright output
+
 ### 1.4
 * Support converting from .ts to .mp4/.mkv.
 * Add support for .mkv attachments. They are copied to output when cutting a file with attachments.
