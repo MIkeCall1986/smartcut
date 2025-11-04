@@ -105,6 +105,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
+include = ["smartcut", "tests"]
 venvPath = "."
 venv = "venv"
 reportUnusedVariable = "warning"
