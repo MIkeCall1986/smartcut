@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from fractions import Fraction
+from typing import cast
 
 import numpy as np
 from av import AudioStream, Packet, VideoStream
@@ -27,6 +28,7 @@ class AudioTrack:
     index: int
 
     packets: list[Packet] = field(default_factory = lambda: [])
+    frame_times_pts: np.ndarray = field(default_factory = lambda: np.empty(()))
     frame_times: np.ndarray = field(default_factory = lambda: np.empty(()))
 
 class MediaContainer:
@@ -34,6 +36,7 @@ class MediaContainer:
     video_stream: VideoStream | None
     path: str
 
+    video_frame_times_pts: np.ndarray
     video_frame_times: np.ndarray
     video_keyframe_indices: list[int]
     gop_start_times_pts_s: list[int] # Smallest pts in a GOP, in seconds
@@ -151,20 +154,27 @@ class MediaContainer:
         if self.video_stream is not None:
             if last_seen_video_dts is not None:
                 self.gop_end_times_dts.append(last_seen_video_dts)
-            self.video_frame_times = np.sort(np.array(frame_pts)) * self.video_stream.time_base
+            frame_pts_sorted = np.sort(np.array(frame_pts))
+            self.video_frame_times_pts = frame_pts_sorted
+            self.video_frame_times = frame_pts_sorted * self.video_stream.time_base
 
             self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
 
         for t in self.audio_tracks:
-            t.frame_times = np.array(list(map(lambda p: p.pts, t.packets))) * t.av_stream.time_base
+            frame_pts_array = np.array(list(map(lambda p: p.pts, t.packets)))
+            t.frame_times_pts = frame_pts_array
+            t.frame_times = frame_pts_array * t.av_stream.time_base
 
     def close(self) -> None:
         self.av_container.close()
 
     def get_next_frame_time(self, t: Fraction) -> Fraction:
+        assert self.video_stream is not None
         t += self.start_time
-        idx = np.searchsorted(self.video_frame_times, t)
-        if idx == len(self.video_frame_times):
+        # Convert to PTS for searching
+        t_pts = round(t / cast(Fraction, self.video_stream.time_base))
+        idx = np.searchsorted(self.video_frame_times_pts, t_pts)
+        if idx == len(self.video_frame_times_pts):
             return self.duration
         elif idx == 0:
             return self.video_frame_times[0] - self.start_time

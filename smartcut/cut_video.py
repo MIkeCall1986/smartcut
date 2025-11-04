@@ -132,11 +132,15 @@ class PassthruAudioCutter:
         self.prev_pts = -100_000
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        start = 0 if cut_segment.start_time <= 0 else np.searchsorted(self.track.frame_times, float(cut_segment.start_time))
-        end = np.searchsorted(self.track.frame_times, float(cut_segment.end_time))
-        in_packets = self.track.packets[start : end]
-
         in_tb = cast(Fraction, self.track.av_stream.time_base)
+        if cut_segment.start_time <= 0:
+            start = 0
+        else:
+            start_pts = round(cut_segment.start_time / in_tb)
+            start = np.searchsorted(self.track.frame_times_pts, start_pts)
+        end_pts = round(cut_segment.end_time / in_tb)
+        end = np.searchsorted(self.track.frame_times_pts, end_pts)
+        in_packets = self.track.packets[start : end]
         packets = []
         for p in in_packets:
             if p.dts is None or p.pts is None:
