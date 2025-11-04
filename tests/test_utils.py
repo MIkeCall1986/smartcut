@@ -1,9 +1,12 @@
 import os
 import platform
+import subprocess
 from collections.abc import Iterable
 from fractions import Fraction
+from itertools import pairwise
 from typing import Any, cast
 
+import ffmpeg
 import numpy as np
 import requests
 import scipy.signal
@@ -16,9 +19,6 @@ from av.stream import Disposition
 
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
 from smartcut.media_container import AudioTrack, MediaContainer
-from smartcut.misc_data import MixInfo
-
-import ffmpeg
 
 AV_TIME_BASE_VALUE: int = int(AV_TIME_BASE) if AV_TIME_BASE else 1
 
@@ -67,14 +67,16 @@ def color_at_time(ts):
     return c
 
 
-def create_test_video(path, target_duration, codec, pixel_format, fps, resolution, x265_options=[], profile=None):
+def create_test_video(path, target_duration, codec, pixel_format, fps, resolution, x265_options=None, profile=None):
     if os.path.exists(path):
         return
     total_frames = target_duration * fps
 
     container = av_open(path, mode="w")
 
-    x265_options.append('log_level=warning')
+    if x265_options is None:
+        x265_options = []
+    x265_options = [*x265_options, 'log_level=warning']
     options = {'x265-params': ':'.join(x265_options)}
     if profile is not None:
         options['profile'] = profile
@@ -422,7 +424,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
                     max_diff = np.max(diff)
                     if max_diff > pixel_tolerance:
                         if failed_frames >= allow_failed_frames:
-                            assert False, f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}, {result_container.path}'
+                            raise AssertionError(f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}, {result_container.path}')
                         frame_failed = True
                         break
                 if frame_failed:
@@ -489,9 +491,9 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
 
 def run_cut_on_keyframes_test(input_path, output_path):
     source = MediaContainer(input_path)
-    cutpoints = source.gop_start_times_pts_s + [source.duration]
+    cutpoints = [*source.gop_start_times_pts_s, source.duration]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     segments = make_adjusted_segment_times(segments, source)
@@ -510,9 +512,9 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
         return run_audiofile_smartcut(input_path, output_path, n_cuts)
     source = MediaContainer(input_path)
     cutpoints = source.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration + 1]
+    cutpoints = [0, *np.sort(np.random.choice(cutpoints, n_cuts, replace=False)), source.duration + 1]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     if audio_export_info == 'auto':
@@ -531,7 +533,7 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     cutpoints = np.arange(duration*1000)[1:-1]
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [duration]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
@@ -648,10 +650,8 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
              log_level='warning')
 
     # Test 2: Complete recode for comparison - merges all segments into one file
-    if recode_codec_override is not None:
-        recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override=recode_codec_override)
-    else:
-        recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
+    recode_settings = (VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override=recode_codec_override)
+                       if recode_codec_override is not None else VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH))
     smart_cut(source, fraction_segments, recode_output,
              audio_export_info=audio_export_info,
              video_settings=recode_settings,
@@ -767,7 +767,7 @@ def make_video_with_subtitles(path, file_duration, subtitle_configs):
             output_options[f'metadata:s:s:{i}'] = f'language={config["language"]}'
 
     # Run ffmpeg command with proper input structure
-    all_inputs = [video_input] + subtitle_inputs
+    all_inputs = [video_input, *subtitle_inputs]
     (
         ffmpeg
         .output(*all_inputs, path, **output_options)
@@ -873,7 +873,6 @@ def get_tears_of_steel_annexb():
 
     if not os.path.exists(ts_filename):
         # Convert first ~200 seconds to TS format (covers our problematic non-IDR keyframes)
-        import subprocess
         result = subprocess.run([
             'ffmpeg', '-i', mp4_filename,
             '-t', '200',  # First 200 seconds (covers 18.5s, 143.4s, 183.3s non-IDR frames)
@@ -897,7 +896,6 @@ def get_testvideos_jellyfish_h265_ts():
     ts_filename = 'testvideos_jellyfish_h265.ts'
 
     if not os.path.exists(ts_filename):
-        import subprocess
         result = subprocess.run([
             'ffmpeg', '-i', mp4_filename,
             '-c', 'copy',

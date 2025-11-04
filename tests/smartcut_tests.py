@@ -1,34 +1,45 @@
 import argparse
-import glob
 import os
-import platform
 import random
 import sys
+import threading
+import time
 import traceback
 from fractions import Fraction
-from time import time
+from itertools import pairwise
 
+import numpy as np
+import psutil
+from av import datasets as av_datasets
 from av import logging as av_logging
 from av import open as av_open
-from av import datasets as av_datasets
 from av.stream import Disposition
-import ffmpeg
-import numpy as np
-import requests
-import scipy
-import scipy.signal
-import soundfile as sf
+from test_utils import (
+    cached_download,
+    check_audio_pts_timestamps,
+    check_stream_dispositions,
+    check_videos_equal,
+    check_videos_equal_segment,
+    compare_tracks,
+    create_test_video,
+    generate_sine_wave,
+    get_attachment_stream_metadata,
+    get_tears_of_steel_annexb,
+    get_testvideos_jellyfish_h265_ts,
+    make_video_and_audio_mkv,
+    make_video_with_attachment,
+    make_video_with_forced_subtitle,
+    make_video_with_subtitles,
+    run_cut_on_keyframes_test,
+    run_partial_smart_cut,
+    run_smartcut_test,
+    to_fraction_segments,
+)
 
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
-from smartcut.media_container import AudioTrack, MediaContainer
-from smartcut.misc_data import MixInfo
-
-from test_utils import *
+from smartcut.media_container import MediaContainer
 
 DEFAULT_SEED = 12345
-
-manual_input: list[str] | None = None
-pixel_color_diff_tolerance: int = 20
 
 # Set the log level to silence the None dts warnings. I believe those can be ignored since
 # we do set dts, except when it's not set in the source in which case it's not clear what
@@ -48,7 +59,8 @@ def parse_args():
     parser.add_argument('--list-tests', action='store_true', help='List all available test functions')
     parser.add_argument('--flaky', type=int, help='Repeat each selected test N times with different seeds')
     parser.add_argument('--seed', type=int, help='Base PRNG seed (defaults to 12345)')
-    parser.add_argument('files', nargs='*', help='Specific files to test (legacy mode)')
+    parser.add_argument('--pixel-tolerance', type=int, default=50, help='Pixel color difference tolerance for file tests (default: 50)')
+    parser.add_argument('files', nargs='*', help='Specific video files to test')
 
     args = parser.parse_args()
 
@@ -104,39 +116,6 @@ def resolve_base_seed(args) -> int:
         return DEFAULT_SEED
     return args.seed
 
-# Handle legacy argument parsing for backwards compatibility
-def setup_legacy_args():
-    global manual_input, pixel_color_diff_tolerance
-
-    # Check if we're using new argument format (--single, --category, etc.)
-    has_new_args = any(arg.startswith('--') for arg in sys.argv[1:])
-
-    if has_new_args:
-        # Using new argument format, no legacy mode
-        manual_input = None
-        pixel_color_diff_tolerance = 20
-        return
-
-    # Check for legacy usage (no -- arguments)
-    legacy_args = [arg for arg in sys.argv[1:] if arg not in ['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all']]
-
-    if legacy_args:
-        if legacy_args[0] == 'all':
-            files = []
-            patterns = ["./*.mkv", "./*.ts", "./*.mpg", "./*.webm", "./*.mp4", "./*.mp3"]
-            for p in patterns:
-                files.extend(glob.glob(p))
-            manual_input = [os.path.abspath(x) for x in files if '_edited' not in x]
-            pixel_color_diff_tolerance = 50
-        else:
-            manual_input = [os.path.abspath(x) for x in legacy_args]
-            pixel_color_diff_tolerance = 50
-    else:
-        manual_input = None
-        pixel_color_diff_tolerance = 20
-
-setup_legacy_args()
-
 os.chdir(os.path.dirname(__file__))
 os.makedirs(data_dir, exist_ok=True)
 os.chdir(data_dir)
@@ -163,9 +142,9 @@ def test_h264_multiple_cuts():
     output_path = test_h264_smart_cut.__name__ + '.mkv'
     for c in [1, 2, 3, 10, 30, 100]:
         cutpoints = source.video_frame_times
-        cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, c, replace=False))) + [source.duration]
+        cutpoints = [0, *np.sort(np.random.choice(cutpoints, c, replace=False)), source.duration]
 
-        segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+        segments = list(pairwise(cutpoints))
         segments = to_fraction_segments(segments)
 
         smart_cut(source, segments, output_path, log_level='warning')
@@ -202,8 +181,6 @@ def test_mkv_with_invalid_timestamps():
 
 def test_peaks_mkv_memory_usage():
     """Test that peaks.mkv doesn't cause excessive memory usage and has proper GOP detection."""
-    import psutil
-
     # Download peaks.mkv using cached_download utility
     url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/peaks.mkv"
     peaks_path = cached_download(url, "peaks.mkv")
@@ -222,16 +199,6 @@ def test_peaks_mkv_memory_usage():
     process = psutil.Process()
     initial_memory = process.memory_info().rss
     peak_memory = initial_memory
-
-    def memory_monitor():
-        nonlocal peak_memory
-        while True:
-            current_memory = process.memory_info().rss
-            peak_memory = max(peak_memory, current_memory)
-            time.sleep(0.1)
-
-    import threading
-    import time
     stop_monitoring = False
 
     def monitor_thread():
@@ -406,9 +373,9 @@ def test_video_recode_codec_override():
     source_container = MediaContainer(input_path)
 
     cutpoints = source_container.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source_container.duration]
+    cutpoints = [0, *np.sort(np.random.choice(cutpoints, n_cuts, replace=False)), source_container.duration]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     output_path_a = test_video_recode_codec_override.__name__ + 'a.mkv'
@@ -482,9 +449,9 @@ def test_vorbis_passthru():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [file_duration]
+    cutpoints = [0, *[Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))], file_duration]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
@@ -498,7 +465,7 @@ def test_vorbis_passthru():
     # Test case from bug report: export 0-2 seconds
     prefix_output_path = test_vorbis_passthru.__name__ + '_prefix.ogg'
     cutpoints = [0, 2]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, prefix_output_path, audio_export_info=export_info)
     prefix_container = MediaContainer(prefix_output_path)
@@ -512,7 +479,7 @@ def test_vorbis_passthru():
 
     # partial file i.e. suffix
     cutpoints = [15, file_duration]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
@@ -532,9 +499,9 @@ def test_mp3_passthru():
     n_cuts = 5
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [file_duration]
+    cutpoints = [0, *[Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))], file_duration]
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
 
     settings = AudioExportSettings(codec='passthru')
@@ -548,7 +515,7 @@ def test_mp3_passthru():
     # Test case: export 0-2 seconds
     prefix_output_path = test_mp3_passthru.__name__ + '_prefix.mp3'
     cutpoints = [0, 2]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, prefix_output_path, audio_export_info=export_info)
     prefix_container = MediaContainer(prefix_output_path)
@@ -564,7 +531,7 @@ def test_mp3_passthru():
     suffix_output_path = test_mp3_passthru.__name__ + '_suffix.mp3'
 
     cutpoints = [15, file_duration]
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = list(pairwise(cutpoints))
     segments = to_fraction_segments(segments)
     smart_cut(source_container, segments, suffix_output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(suffix_output_path)
@@ -1481,7 +1448,7 @@ def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
         print("--flaky requires a positive integer")
         return
 
-    perf_timer = time()
+    perf_timer = time.time()
     passed = 0
     failed = 0
 
@@ -1515,24 +1482,25 @@ def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
                 failed += 1
                 # Continue running remaining iterations to gather full flake info
 
-    elapsed = time() - perf_timer
+    elapsed = time.time() - perf_timer
     print(f'\nResults: {passed} passed, {failed} failed')
     print(f'Tests ran in {elapsed:0.1f}s')
 
 if __name__ == "__main__":
-    if manual_input is None:
-        # Parse arguments for category or single test selection
-        args = parse_args()
-        base_seed = resolve_base_seed(args)
-        run_tests(args.category, args.single, args.flaky, base_seed)
-    else:
-        # Legacy mode - test specific files
-        seed_all(DEFAULT_SEED)
-        for file in manual_input:
+    args = parse_args()
+    base_seed = resolve_base_seed(args)
+
+    if args.files:
+        # Test specific files
+        seed_all(base_seed)
+        for file_path in args.files:
             try:
-                print(f"Testing {file}")
-                run_smartcut_test(file, os.path.split(file)[1], 2, audio_export_info='auto', pixel_tolerance=50)
-                print(f"Done: {file}")
-            except Exception as e:
-                print(f"Fail: {file}")
+                print(f"Testing {file_path}")
+                run_smartcut_test(file_path, os.path.split(file_path)[1], 2, audio_export_info='auto', pixel_tolerance=args.pixel_tolerance)
+                print(f"Done: {file_path}")
+            except Exception:
+                print(f"Fail: {file_path}")
                 traceback.print_exc()
+    else:
+        # Run test categories or single tests
+        run_tests(args.category, args.single, args.flaky, base_seed)

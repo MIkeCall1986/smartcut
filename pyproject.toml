@@ -93,11 +93,8 @@ ignore = [
     "PLR0915",  # Too many statements
     "PLR0913",  # Too many arguments
     "PLR0911",  # Too many return statements
-    "PLW2901",  # redefined-loop-name
-    "ARG002",   # unused-method-argument
-    "E741",     # ambiguous-variable-name
-    "F841",     # unused-variable
     "B905",     # zip without strict= parameter
+    "PLW2901",  # for loop variable overwritten
 ]
 
 [tool.ruff.format]
@@ -105,3 +102,11 @@ ignore = [
 quote-style = "double"
 # Use spaces for indentation
 indent-style = "space"
+
+[tool.pyright]
+venvPath = "."
+venv = "venv"
+reportUnusedVariable = "warning"
+reportUnusedFunction = "warning"
+reportUnusedClass = "warning"
+reportUnusedImport = "warning"
