@@ -1,9 +1,9 @@
 import heapq
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Protocol, cast
+from typing import Protocol, TypeAlias, cast
 
 import av
 import av.bitstream
@@ -27,6 +27,15 @@ class ProgressCallback(Protocol):
     def emit(self, value: int) -> None:
         """Emit progress update."""
         ...
+
+
+class StreamGenerator(Protocol):
+    """Protocol for stream generators that produce packets for output."""
+    def segment(self, cut_segment: CutSegment) -> list[Packet]: ...
+    def finish(self) -> list[Packet]: ...
+
+
+StreamGeneratorFactory: TypeAlias = Callable[[OutputContainer], StreamGenerator]
 
 
 class CancelObject:
@@ -815,7 +824,8 @@ class VideoCutter:
 
 def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo | None = None, log_level: str | None = None, progress: ProgressCallback | None = None,
-              video_settings: VideoSettings | None = None, segment_mode: bool = False, cancel_object: CancelObject | None = None) -> Exception | None:
+              video_settings: VideoSettings | None = None, segment_mode: bool = False, cancel_object: CancelObject | None = None,
+              external_generator_factories: list[StreamGeneratorFactory] | None = None) -> Exception | None:
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
@@ -876,6 +886,10 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 generators.append(SubtitleCutter(media_container, output_av_container, sub_track_i))
+
+            if external_generator_factories:
+                for factory in external_generator_factories:
+                    generators.append(factory(output_av_container))
 
             output_av_container.start_encoding()
             if progress is not None:
