@@ -249,6 +249,72 @@ def test_peaks_mkv_memory_usage() -> None:
     print(f"Peak memory increase: {memory_increase / (1024*1024):.1f} MB")
     assert memory_increase < max_allowed_memory, f"Memory usage too high: {memory_increase / (1024*1024):.1f} MB"
 
+def test_hevc_mkv_nal_type_detection() -> None:
+    """Test that HEVC NAL type detection finds IDR frames, not VPS headers.
+
+    Regression test for a bug where get_h265_nal_unit_type() only read the first
+    NAL unit in MP4-format packets. For MKV files with HEVC, keyframe packets
+    contain multiple NAL units (VPS, SPS, PPS, IDR), and the function would
+    return the VPS type (39) instead of the actual IDR type (19/20).
+    This caused most keyframes to be rejected as "unsafe", resulting in
+    very few GOPs being detected.
+    """
+    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/hevc_mkv_no_dts.mkv"
+    test_path = cached_download(url, "hevc_mkv_no_dts.mkv")
+
+    container = MediaContainer(test_path)
+
+    # The test file should have multiple GOPs (at least 3 in ~10 seconds)
+    # Before the fix, only 1 or 2 GOPs would be detected
+    actual_gops = len(container.gop_start_times_pts_s)
+    expected_min_gops = 3
+
+    assert actual_gops >= expected_min_gops, (
+        f"Expected at least {expected_min_gops} GOPs but found {actual_gops}. "
+        "This suggests NAL type detection is returning VPS/SPS types instead of IDR."
+    )
+
+    container.close()
+
+def test_hevc_mkv_no_dts_remux() -> None:
+    """Test that smartcut handles HEVC MKV files with DTS=N/A packets.
+
+    Regression test for a bug where packets with DTS=None would get monotonically
+    increasing DTS values generated that could exceed PTS (violating PTS >= DTS).
+    This happened because the code used max(pts, last_dts + 1) which would push
+    DTS above PTS for B-frames.
+    """
+    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/hevc_mkv_no_dts.mkv"
+    test_path = cached_download(url, "hevc_mkv_no_dts.mkv")
+
+    output_path = test_hevc_mkv_no_dts_remux.__name__ + '.mkv'
+
+    container = MediaContainer(test_path)
+    segments = [(Fraction(0), Fraction(5))]  # First 5 seconds
+
+    audio_settings: list[AudioExportSettings | None] = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
+    export_info = AudioExportInfo(output_tracks=audio_settings)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+
+    # This should not raise an error - before the fix it would fail with:
+    # av.error.ValueError: [Errno 22] Invalid argument
+    smart_cut(
+        container,
+        segments,
+        output_path,
+        audio_export_info=export_info,
+        video_settings=video_settings,
+        log_level='error'
+    )
+
+    container.close()
+
+    # Verify output was created
+    assert os.path.exists(output_path), "Output file was not created"
+
+    # Clean up
+    os.remove(output_path)
+
 def test_h264_24_fps_long() -> None:
     filename = 'long_h264.mkv'
     # 15 mins
@@ -773,6 +839,13 @@ def test_libde265_tears_of_steel_h265() -> None:
     Downloads a long HEVC MKV sample and validates smart cut against a full
     recode. For speed, force the recode path to H.264 while preserving HEVC
     for the smart-cut path.
+
+    This file has 367 CRA frames and only 1 IDR frame, with RASL
+    pictures following each CRA.
+
+    Key validation: frame counts must match between smartcut and recode,
+    confirming that RASL pictures are properly handled by recoding CRA+RASL
+    segments instead of dropping them.
     """
     filename = cached_download('https://www.libde265.org/hevc-bitstreams/tos-1720x720-cfg01.mkv', 'libde265_tos_1720x720_cfg01.mkv')
     output_base = test_libde265_tears_of_steel_h265.__name__
@@ -1282,6 +1355,8 @@ def get_test_categories() -> dict[str, list]:
             test_mp4_h265_smart_cut,
             test_peaks_mkv_memory_usage,
             test_ts_h265_to_mp4_smart_cut,
+            test_hevc_mkv_nal_type_detection,
+            test_hevc_mkv_no_dts_remux,
         ],
 
         'codecs': [

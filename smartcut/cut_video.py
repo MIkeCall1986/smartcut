@@ -477,7 +477,8 @@ class VideoCutter:
                 packet.dts = pts_value
             else:
                 # Subsequent packets, ensure monotonic increase
-                packet.dts = max(pts_value, self.last_dts + 1)
+                # Don't jump DTS up to match PTS - just increment minimally to preserve PTS >= DTS
+                packet.dts = self.last_dts + 1
             self.last_dts = packet.dts
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:

@@ -56,7 +56,6 @@ def convert_hevc_cra_to_bla(packet_data: bytes) -> bytes:
 
     return bytes(data)
 
-
 def get_h265_nal_unit_type(packet_data: bytes) -> int | None:
     """
     Extract NAL unit type from H.265/HEVC packet data.
@@ -86,10 +85,33 @@ def get_h265_nal_unit_type(packet_data: bytes) -> int | None:
         # Avoid misinterpreting Annex B start codes as MP4 lengths
         # Annex B start codes are 0x00000001 or 0x000001, which would be lengths 1 or very small
         if nal_length > 4 and nal_length <= len(data) - 4:
-            # Found valid length-prefixed NAL unit
-            nal_header = data[4:6]
-            nal_unit_type = (nal_header[0] >> 1) & 0x3F
-            return nal_unit_type
+            # Found valid length-prefixed NAL units - scan all of them
+            nal_types_found = []
+            i = 0
+            while i < len(data) - 4:
+                nal_len = int.from_bytes(data[i:i+4], byteorder='big')
+                if nal_len < 2 or nal_len > len(data) - i - 4:
+                    break  # Invalid NAL length
+                if i + 5 < len(data):
+                    nal_type = (data[i + 4] >> 1) & 0x3F
+                    nal_types_found.append(nal_type)
+                    # Found safe keyframe - prioritize these
+                    if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
+                        return nal_type
+                i += 4 + nal_len
+
+            # No safe keyframes found, prioritize picture types (0-21) over metadata (32-40)
+            if nal_types_found:
+                # First check for CRA frames (21) - these are picture types but need special handling
+                for nal_type in nal_types_found:
+                    if nal_type == 21:  # CRA frame
+                        return nal_type
+                # Then check for any other picture NAL types (0-15)
+                for nal_type in nal_types_found:
+                    if 0 <= nal_type <= 15:  # Other picture types
+                        return nal_type
+                # Finally return first metadata type if no pictures found
+                return nal_types_found[0]
 
     # Try Annex B format (start codes) - search entire packet for safe keyframes
     nal_types_found = []
@@ -164,6 +186,26 @@ def is_safe_h265_keyframe_nal(nal_type: int | None) -> bool:
         return True  # Can't know for sure
     # Accept BLA(16,17,18), IDR(19,20), CRA(21) frames and parameter sets (32,33,34)
     return nal_type in [16, 17, 18, 19, 20, 21, 32, 33, 34]
+
+
+def is_rasl_nal_type(nal_type: int | None) -> bool:
+    """
+    Check if NAL type is RASL (Random Access Skipped Leading).
+
+    RASL pictures (types 8-9) reference frames from before the associated CRA point.
+    When cutting at a CRA frame, RASL pictures become undecodable because their
+    reference frames are missing. They must be recoded to be properly displayed.
+
+    Args:
+        nal_type: H.265 NAL unit type (int)
+
+    Returns:
+        bool: True if this is a RASL NAL type
+    """
+    if nal_type is None:
+        return False
+    return nal_type in [8, 9]  # RASL_N (8), RASL_R (9)
+
 
 def get_h264_nal_unit_type(packet_data: bytes) -> int | None:
     """
