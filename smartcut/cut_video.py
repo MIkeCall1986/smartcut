@@ -462,6 +462,13 @@ class VideoCutter:
         packet.stream = self.out_stream
         packet.time_base = self.out_time_base
 
+        # Treat garbage DTS values as None (can occur during encoder flush due to PyAV
+        # reading uninitialized memory when frame is None during flush)
+        # See: https://github.com/PyAV-Org/PyAV/issues/397
+        #      https://github.com/PyAV-Org/PyAV/discussions/933
+        if packet.dts is not None and (packet.dts < -900_000 or packet.dts > 1_000_000_000_000):
+            packet.dts = None
+
         if packet.dts is not None:
             if packet.dts <= self.last_dts:
                 packet.dts = self.last_dts + 1
@@ -517,7 +524,6 @@ class VideoCutter:
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
         if cut_segment.require_recode:
             packets = self.recode_segment(cut_segment)
-            print(f"[recode] seg {cut_segment.start_time:.3f}-{cut_segment.end_time:.3f}", flush=True)
         elif self._should_hybrid_recode_cra(cut_segment):
             # CRA GOP with leading pictures: recode leading pics, remux rest
             # Don't flush encoder - leading frames continue into existing encoder
@@ -525,14 +531,12 @@ class VideoCutter:
             # Update tracking variables (same as remux path)
             self.last_remuxed_segment_gop_index = cut_segment.gop_index
             self.is_first_remuxed_segment = False
-            print(f"[hybrid] seg {cut_segment.start_time:.3f}-{cut_segment.end_time:.3f}", flush=True)
         else:
             packets = self.flush_encoder()
             packets.extend(self.remux_segment(cut_segment))
             # Update tracking variables for CRA to BLA conversion
             self.last_remuxed_segment_gop_index = cut_segment.gop_index
             self.is_first_remuxed_segment = False
-            print(f"[remux] seg {cut_segment.start_time:.3f}-{cut_segment.end_time:.3f}", flush=True)
 
         self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
 

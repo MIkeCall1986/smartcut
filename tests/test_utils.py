@@ -351,7 +351,7 @@ def _infer_frame_count_anomaly(source_times: list[Fraction], result_times: list[
         return None
 
 
-def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0) -> None:
+def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0, allow_failed_pixels_per_frame: int = 0) -> None:
     source_stream = source_container.video_stream
     result_stream = result_container.video_stream
     assert source_stream is not None, "Source container is missing a video stream"
@@ -404,7 +404,8 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
 
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
-    failed_frames = 0
+    failed_frame_info: list[tuple[int, float]] = []  # (frame_index, time_seconds)
+    frame_times = source_container.video_frame_times
     with av_open(source_container.path, mode='r') as source_av_raw, av_open(result_container.path, mode='r') as result_av_raw:
         source_av = cast(InputContainer, source_av_raw)
         result_av = cast(InputContainer, result_av_raw)
@@ -415,7 +416,8 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
             result_numpy = result_frame.to_ndarray(format='rgb24')
             assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
 
-            frame_failed = False
+            failed_pixels_in_frame = 0
+            last_fail_colors = None
             for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
                 for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
                     source_color = source_numpy[y, x]
@@ -423,15 +425,22 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
                     diff = np.abs(source_color.astype(np.int16) - result_color)
                     max_diff = np.max(diff)
                     if max_diff > pixel_tolerance:
-                        if failed_frames >= allow_failed_frames:
-                            raise AssertionError(f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}, {result_container.path}')
-                        frame_failed = True
-                        break
-                if frame_failed:
-                    break
+                        failed_pixels_in_frame += 1
+                        last_fail_colors = (source_color, result_color)
 
-            if frame_failed:
-                failed_frames += 1
+            if failed_pixels_in_frame > allow_failed_pixels_per_frame:
+                frame_time = float(frame_times[frame_i]) if frame_i < len(frame_times) else 0.0
+                if len(failed_frame_info) >= allow_failed_frames:
+                    failed_frame_info.append((frame_i, frame_time))
+                    prev_failures = ", ".join(f"#{f}@{t:.3f}s" for f, t in failed_frame_info[:-1])
+                    source_color, result_color = last_fail_colors if last_fail_colors else (None, None)
+                    raise AssertionError(
+                        f'Large color deviation at frame {frame_i} ({frame_time:.3f}s), {failed_pixels_in_frame}/9 pixels failed. '
+                        f'Exp: {source_color}, got: {result_color}. '
+                        f'Failed frames ({len(failed_frame_info)}/{allow_failed_frames + 1}): {prev_failures}, #{frame_i}@{frame_time:.3f}s. '
+                        f'{result_container.path}'
+                    )
+                failed_frame_info.append((frame_i, frame_time))
 
 def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time: float | Fraction = 0.0, duration: float | None = None, pixel_tolerance: int = 20) -> None:
     """Fast pixel testing of small video segments instead of entire video"""
@@ -557,6 +566,7 @@ def run_partial_smart_cut(
     pixel_tolerance: int = 20,
     allow_failed_frames: int = 0,
     recode_codec_override: str | None = None,
+    allow_failed_pixels_per_frame: int = 0,
 ) -> None:
     """
     Test smart cutting on short segments from random positions in long videos.
@@ -676,7 +686,7 @@ def run_partial_smart_cut(
     smartcut_container = MediaContainer(smartcut_output)
     recode_container = MediaContainer(recode_output)
 
-    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames)
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames, allow_failed_pixels_per_frame=allow_failed_pixels_per_frame)
 
     smartcut_container.close()
     recode_container.close()
