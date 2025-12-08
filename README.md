@@ -195,6 +195,11 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.6
+* Proper handling of HEVC CRA and RASL frames.
+* Other small compatibility changes.
+* Set encoded by program name to 'smartcut'.
+
 ### 1.5
 * Better handling of inputs where DTS is missing.
 * Code cleanups to get clean pyright output
