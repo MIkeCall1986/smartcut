@@ -593,10 +593,7 @@ def run_partial_smart_cut(
     total_duration = float(source.duration)
 
     # Skip if video is too short for meaningful testing
-    if total_duration < segment_duration * n_segments * 2:
-        print(f"Video too short ({total_duration:.1f}s) for partial testing, using regular test")
-        return run_smartcut_test(input_path, output_base_name + os.path.splitext(input_path)[1], 2,
-                             audio_export_info, video_settings, pixel_tolerance)
+    assert total_duration >= segment_duration * n_segments * 2, f"Video too short ({total_duration:.1f}s) for partial testing, use regular test"
 
     # Calculate safe range for random segment selection (avoid first/last 30 seconds)
     safe_start = 30

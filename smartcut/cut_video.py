@@ -17,6 +17,8 @@ from av.stream import Disposition
 from av.video.frame import PictureType, VideoFrame
 
 from smartcut.media_container import MediaContainer
+
+__version__ = "1.5"
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type
@@ -447,6 +449,11 @@ class VideoCutter:
             # Repeat headers. This should be the same as `global_headers = False`,
             # but for some reason setting this explicitly is necessary with x265.
             x265_params.append('repeat-headers=1')
+
+            # Disable encoder info SEI. Since smartcut only re-encodes frames at cut points,
+            # having x265 write its encoding settings would be misleading - it doesn't
+            # represent the original video's settings.
+            x265_params.append('info=0')
 
             if self.log_level is not None:
                 x265_params.append(f'log_level={self.log_level}')
@@ -918,6 +925,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         if cancel_object is not None and cancel_object.cancelled:
             break
         with av.open(output_path_segment[0], 'w') as output_av_container:
+            output_av_container.metadata['ENCODED_BY'] = f'smartcut {__version__}'
 
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
