@@ -12,6 +12,8 @@ from av.stream import Stream
 from smartcut.nal_tools import (
     get_h264_nal_unit_type,
     get_h265_nal_unit_type,
+    is_leading_picture_nal_type,
+    is_rasl_nal_type,
     is_safe_h264_keyframe_nal,
     is_safe_h265_keyframe_nal,
 )
@@ -44,6 +46,8 @@ class MediaContainer:
     gop_start_times_dts: list[int]
     gop_end_times_dts: list[int]
     gop_start_nal_types: list[int | None]  # NAL type of first picture frame after each GOP boundary
+    gop_leading_end_dts: list[int | None]  # DTS of first non-leading picture in GOP (None if no leading pics)
+    gop_has_rasl: list[bool]  # True if GOP has RASL frames (need priming/hybrid recode)
 
     audio_tracks: list[AudioTrack]
     subtitle_tracks: list
@@ -106,7 +110,13 @@ class MediaContainer:
         self.gop_start_times_dts = []
         self.gop_end_times_dts = []
         self.gop_start_nal_types = []
+        self.gop_leading_end_dts = []
+        self.gop_has_rasl = []
         last_seen_video_dts = None
+        # Track leading pictures in current CRA GOP
+        tracking_leading_in_cra = False
+        current_gop_has_leading = False
+        current_gop_has_rasl = False
 
         for packet in av_container.demux(streams):
             if packet.pts is None:
@@ -133,6 +143,13 @@ class MediaContainer:
                     elif is_h264:
                         is_safe_keyframe = is_safe_h264_keyframe_nal(nal_type)
                     if is_safe_keyframe:
+                        # Finalize previous GOP's leading picture tracking
+                        if tracking_leading_in_cra:
+                            # Previous GOP was CRA but we never found non-leading picture
+                            # This means all frames after CRA were leading (unusual but possible)
+                            self.gop_leading_end_dts.append(None if not current_gop_has_leading else last_seen_video_dts)
+                            self.gop_has_rasl.append(current_gop_has_rasl)
+
                         self.video_keyframe_indices.append(len(frame_pts))
                         dts = packet.dts if packet.dts is not None else -100_000_000
                         self.gop_start_times_dts.append(dts)
@@ -140,6 +157,39 @@ class MediaContainer:
 
                         if last_seen_video_dts is not None:
                             self.gop_end_times_dts.append(last_seen_video_dts)
+
+                        # Start tracking leading pictures if this is a CRA GOP
+                        if is_h265 and nal_type == 21:  # CRA frame
+                            tracking_leading_in_cra = True
+                            current_gop_has_leading = False
+                            current_gop_has_rasl = False
+                        else:
+                            # Not a CRA, no leading pictures to track
+                            tracking_leading_in_cra = False
+                            current_gop_has_leading = False
+                            current_gop_has_rasl = False
+                            self.gop_leading_end_dts.append(None)
+                            self.gop_has_rasl.append(False)
+
+                elif tracking_leading_in_cra and is_h265:
+                    # Check if this non-keyframe packet is a leading picture
+                    packet_nal_type = get_h265_nal_unit_type(bytes(packet))
+                    if is_leading_picture_nal_type(packet_nal_type):
+                        current_gop_has_leading = True
+                        if is_rasl_nal_type(packet_nal_type):
+                            current_gop_has_rasl = True
+                    else:
+                        # Found first non-leading picture
+                        if current_gop_has_leading:
+                            # Record boundary only if there were actual leading pictures
+                            dts = packet.dts if packet.dts is not None else -100_000_000
+                            self.gop_leading_end_dts.append(dts)
+                        else:
+                            # No leading pictures in this CRA GOP
+                            self.gop_leading_end_dts.append(None)
+                        self.gop_has_rasl.append(current_gop_has_rasl)
+                        tracking_leading_in_cra = False
+
                 last_seen_video_dts = packet.dts
                 frame_pts.append(packet.pts)
             elif packet.stream.type == 'audio':
@@ -152,6 +202,10 @@ class MediaContainer:
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
 
         if self.video_stream is not None:
+            # Finalize last GOP's leading picture tracking if still active
+            if tracking_leading_in_cra:
+                self.gop_leading_end_dts.append(None if not current_gop_has_leading else last_seen_video_dts)
+                self.gop_has_rasl.append(current_gop_has_rasl)
             if last_seen_video_dts is not None:
                 self.gop_end_times_dts.append(last_seen_video_dts)
             frame_pts_sorted = np.sort(np.array(frame_pts))

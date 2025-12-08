@@ -207,6 +207,43 @@ def is_rasl_nal_type(nal_type: int | None) -> bool:
     return nal_type in [8, 9]  # RASL_N (8), RASL_R (9)
 
 
+def is_radl_nal_type(nal_type: int | None) -> bool:
+    """
+    Check if NAL type is RADL (Random Access Decodable Leading).
+
+    RADL pictures (types 6-7) are leading pictures that do NOT reference frames
+    before the associated IRAP point. They can be decoded without priming from
+    a previous GOP.
+
+    Args:
+        nal_type: H.265 NAL unit type (int)
+
+    Returns:
+        bool: True if this is a RADL NAL type
+    """
+    if nal_type is None:
+        return False
+    return nal_type in [6, 7]  # RADL_N (6), RADL_R (7)
+
+
+def is_leading_picture_nal_type(nal_type: int | None) -> bool:
+    """
+    Check if NAL type is a leading picture (RASL or RADL).
+
+    Leading pictures are displayed before the associated IRAP in presentation order
+    but decoded after. When cutting at an IRAP that has RASL pictures, all leading
+    pictures (both RASL and RADL) should be recoded together for simplicity,
+    especially when they are interleaved in PTS order.
+
+    Args:
+        nal_type: H.265 NAL unit type (int)
+
+    Returns:
+        bool: True if this is a leading picture NAL type (RASL or RADL)
+    """
+    return is_rasl_nal_type(nal_type) or is_radl_nal_type(nal_type)
+
+
 def get_h264_nal_unit_type(packet_data: bytes) -> int | None:
     """
     Extract NAL unit type from H.264/AVC packet data.
