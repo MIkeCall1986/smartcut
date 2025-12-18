@@ -4,15 +4,7 @@ from fractions import Fraction
 
 from tqdm import tqdm
 
-from smartcut.cut_video import (
-    AudioExportInfo,
-    AudioExportSettings,
-    VideoExportMode,
-    VideoExportQuality,
-    VideoSettings,
-    smart_cut,
-    __version__
-)
+from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, __version__, smart_cut
 from smartcut.media_container import MediaContainer
 
 

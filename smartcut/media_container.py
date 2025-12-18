@@ -240,3 +240,68 @@ class MediaContainer:
                 return prev_val - self.start_time
             else:
                 return next_val - self.start_time
+
+    def get_frame_time_at_or_before(self, t: Fraction) -> Fraction:
+        """Get frame time at or before the given time (snap down).
+
+        For video files: uses video frame times.
+        For audio-only files: uses first audio track's frame times.
+
+        Args:
+            t: Time in seconds (relative to start_time=0)
+
+        Returns:
+            Frame time at or before t, or 0 if t is before first frame.
+        """
+        t_absolute = t + self.start_time
+
+        if self.video_stream is not None:
+            frame_times = self.video_frame_times
+            frame_times_pts = self.video_frame_times_pts
+            time_base = cast(Fraction, self.video_stream.time_base)
+        elif self.audio_tracks:
+            track = self.audio_tracks[0]
+            frame_times = track.frame_times
+            frame_times_pts = track.frame_times_pts
+            time_base = cast(Fraction, track.av_stream.time_base)
+        else:
+            return t  # No frames to snap to
+
+        t_pts = round(t_absolute / time_base)
+        # side='right' ensures we get index after t if t is exactly on a frame boundary
+        idx = int(np.searchsorted(frame_times_pts, t_pts, side='right')) - 1
+        idx = max(0, idx)
+        return frame_times[idx] - self.start_time
+
+    def get_frame_time_at_or_after(self, t: Fraction) -> Fraction:
+        """Get frame time at or after the given time (snap up).
+
+        For video files: uses video frame times.
+        For audio-only files: uses first audio track's frame times.
+
+        Args:
+            t: Time in seconds (relative to start_time=0)
+
+        Returns:
+            Frame time at or after t, or duration if t is past last frame.
+        """
+        t_absolute = t + self.start_time
+
+        if self.video_stream is not None:
+            frame_times = self.video_frame_times
+            frame_times_pts = self.video_frame_times_pts
+            time_base = cast(Fraction, self.video_stream.time_base)
+        elif self.audio_tracks:
+            track = self.audio_tracks[0]
+            frame_times = track.frame_times
+            frame_times_pts = track.frame_times_pts
+            time_base = cast(Fraction, track.av_stream.time_base)
+        else:
+            return t  # No frames to snap to
+
+        t_pts = round(t_absolute / time_base)
+        # side='left' ensures we get index of frame at or after t
+        idx = int(np.searchsorted(frame_times_pts, t_pts, side='left'))
+        if idx >= len(frame_times):
+            return self.duration
+        return frame_times[idx] - self.start_time
