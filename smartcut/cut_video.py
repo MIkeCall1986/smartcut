@@ -18,7 +18,7 @@ from av.video.frame import PictureType, VideoFrame
 
 from smartcut.media_container import MediaContainer
 
-__version__ = "1.6"
+__version__ = "1.7"
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type

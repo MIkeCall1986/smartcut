@@ -195,6 +195,10 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.7
+* Set hev1 encoder tag for h265 in mp4 and mov. Improves compatibility in some cases.
+* Improved test suite to catch more encoding issues.
+
 ### 1.6
 * Proper handling of HEVC CRA and RASL frames.
 * Other small compatibility changes.
