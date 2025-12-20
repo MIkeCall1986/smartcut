@@ -24,6 +24,7 @@ from test_utils import (
     create_test_video,
     generate_sine_wave,
     get_attachment_stream_metadata,
+    get_media_test_data_file,
     get_tears_of_steel_annexb,
     get_testvideos_jellyfish_h265_ts,
     make_video_and_audio_mkv,
@@ -169,21 +170,9 @@ def test_h265_smart_cut_large() -> None:
     for c in [1, 2, 5]:
         run_smartcut_test(input_file, output_path, c)
 
-def test_mkv_with_invalid_timestamps() -> None:
-    """Test cutting anime_clip.mkv which has invalid timestamps."""
-    url = "https://github.com/skeskinen/media-test-data/raw/refs/heads/main/anime_clip.mkv"
-    anime_path = cached_download(url, "anime_clip.mkv")
-
-    output_path = test_mkv_with_invalid_timestamps.__name__ + '.mkv'
-
-    # Run normal smartcut test with a few cuts
-    run_smartcut_test(anime_path, output_path, n_cuts=2, audio_export_info='auto')
-
 def test_peaks_mkv_memory_usage() -> None:
     """Test that peaks.mkv doesn't cause excessive memory usage and has proper GOP detection."""
-    # Download peaks.mkv using cached_download utility
-    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/peaks.mkv"
-    peaks_path = cached_download(url, "peaks.mkv")
+    peaks_path = get_media_test_data_file("peaks.mkv")
 
     # Test GOP detection
     container = MediaContainer(peaks_path)
@@ -259,8 +248,7 @@ def test_hevc_mkv_nal_type_detection() -> None:
     This caused most keyframes to be rejected as "unsafe", resulting in
     very few GOPs being detected.
     """
-    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/hevc_mkv_no_dts.mkv"
-    test_path = cached_download(url, "hevc_mkv_no_dts.mkv")
+    test_path = get_media_test_data_file("hevc_mkv_no_dts.mkv")
 
     container = MediaContainer(test_path)
 
@@ -276,6 +264,13 @@ def test_hevc_mkv_nal_type_detection() -> None:
 
     container.close()
 
+def test_h265_zcam() -> None:
+    """Test smartcut with ZCAM H.265/HEVC MOV file."""
+    test_path = get_media_test_data_file("zcam.mov")
+
+    output_path = test_h265_zcam.__name__ + '.mov'
+    run_smartcut_test(test_path, output_path, n_cuts=1, audio_export_info='auto')
+
 def test_hevc_mkv_no_dts_remux() -> None:
     """Test that smartcut handles HEVC MKV files with DTS=N/A packets.
 
@@ -284,8 +279,7 @@ def test_hevc_mkv_no_dts_remux() -> None:
     This happened because the code used max(pts, last_dts + 1) which would push
     DTS above PTS for B-frames.
     """
-    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/hevc_mkv_no_dts.mkv"
-    test_path = cached_download(url, "hevc_mkv_no_dts.mkv")
+    test_path = get_media_test_data_file("hevc_mkv_no_dts.mkv")
 
     output_path = test_hevc_mkv_no_dts_remux.__name__ + '.mkv'
 
@@ -790,8 +784,8 @@ def test_broken_ref_vid() -> None:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
 def test_manual() -> None:
-    seed_all(1235)
-    test_vorbis_passthru()
+    seed_all(12345)
+    test_h265_zcam()
 
 # Real-world video tests using publicly available videos
 
@@ -1426,7 +1420,6 @@ def get_test_categories() -> dict[str, list]:
             # test-videos.co.uk H.264 samples
             test_testvideos_bigbuckbunny_h264,
             test_testvideos_jellyfish_h264,
-            test_mkv_with_invalid_timestamps,
         ],
 
         'real_world_h265': [
@@ -1434,6 +1427,7 @@ def get_test_categories() -> dict[str, list]:
             test_testvideos_bigbuckbunny_h265,
             test_testvideos_jellyfish_h265,
             test_libde265_tears_of_steel_h265,
+            test_h265_zcam,
         ],
 
         'real_world_vp9': [

@@ -23,6 +23,10 @@ from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_fo
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type
 
+# When True, disables B-frames in encoded segments for simpler stream handling.
+# When False, preserves the input stream's B-frame settings.
+NO_B_FRAMES = False
+
 
 class ProgressCallback(Protocol):
     """Protocol for progress callback objects."""
@@ -461,6 +465,11 @@ class VideoCutter:
             if self.video_settings.quality == VideoExportQuality.LOSSLESS:
                 x265_params.append('lossless=1')
 
+            if NO_B_FRAMES:
+                x265_params.append('bframes=0')
+            else:
+                x265_params.append(f'bframes={self.in_stream.codec_context.max_b_frames}')
+
             self.encoding_options['x265-params'] = ':'.join(x265_params)
 
 
@@ -507,6 +516,11 @@ class VideoCutter:
         if muxing_codec.rate is not None:
             enc_codec.rate = muxing_codec.rate
         enc_codec.options.update(self.encoding_options)
+
+        if NO_B_FRAMES:
+            enc_codec.max_b_frames = 0
+        else:
+            enc_codec.max_b_frames = self.in_stream.codec_context.max_b_frames
 
         enc_codec.width = muxing_codec.width
         enc_codec.height = muxing_codec.height
