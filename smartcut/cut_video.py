@@ -23,11 +23,6 @@ from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_fo
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type
 
-# When True, disables B-frames in encoded segments for simpler stream handling.
-# When False, preserves the input stream's B-frame settings.
-NO_B_FRAMES = False
-
-
 class ProgressCallback(Protocol):
     """Protocol for progress callback objects."""
     def emit(self, value: int) -> None:
@@ -465,11 +460,6 @@ class VideoCutter:
             if self.video_settings.quality == VideoExportQuality.LOSSLESS:
                 x265_params.append('lossless=1')
 
-            if NO_B_FRAMES:
-                x265_params.append('bframes=0')
-            else:
-                x265_params.append(f'bframes={self.in_stream.codec_context.max_b_frames}')
-
             self.encoding_options['x265-params'] = ':'.join(x265_params)
 
 
@@ -488,11 +478,14 @@ class VideoCutter:
         if packet.dts is not None:
             if packet.dts <= self.last_dts:
                 packet.dts = self.last_dts + 1
-                # Ensure PTS >= DTS (required by all container formats)
-                if packet.pts is not None and packet.pts < packet.dts:
-                    packet.pts = packet.dts
+            # Ensure PTS >= DTS (required by all container formats)
+            # This check is separate from the monotonicity check above because
+            # remux_segment may produce packets with DTS > PTS when adjusting
+            # for B-frame delays after an encoded segment.
+            if packet.pts is not None and packet.pts < packet.dts:
+                packet.pts = packet.dts
             self.last_dts = packet.dts
-        else:
+        if packet.dts is None:
             # When DTS is None, use PTS as fallback (common for keyframes without B-frame reordering)
             # Ensure we don't use the sentinel value to avoid extremely negative DTS
             pts_value = packet.pts if packet.pts is not None else 0
@@ -517,10 +510,10 @@ class VideoCutter:
             enc_codec.rate = muxing_codec.rate
         enc_codec.options.update(self.encoding_options)
 
-        if NO_B_FRAMES:
-            enc_codec.max_b_frames = 0
-        else:
-            enc_codec.max_b_frames = self.in_stream.codec_context.max_b_frames
+        # Leaving this here for future consideration: manually setting the bframe count seems to make sense in principle.
+        # But atleast in the test suite, it seemed to cause more issues that in solves.
+        # metadata_b_frames = max(self.in_stream.codec_context.max_b_frames, 1 if self.in_stream.codec_context.has_b_frames else 0)
+        # enc_codec.max_b_frames = metadata_b_frames
 
         enc_codec.width = muxing_codec.width
         enc_codec.height = muxing_codec.height
@@ -988,7 +981,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 assert s.start_time < s.end_time, f"Invalid segment: start_time {s.start_time} >= end_time {s.end_time}"
                 for g in generators:
                     for packet in g.segment(s):
-                        if packet.dts < -900_000:
+                        if packet.dts is not None and packet.dts < -900_000:
                             packet.dts = None
                         if packet.dts is not None and packet.dts > 1_000_000_000_000:
                             print(f"BAD DTS: seg {s.start_time:.3f}-{s.end_time:.3f} gop={s.gop_index} recode={s.require_recode} pts={packet.pts} dts={packet.dts}")
