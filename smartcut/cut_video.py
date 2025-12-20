@@ -337,40 +337,38 @@ class VideoCutter:
         self._last_fetch_end_dts: int | None = None
 
     def _normalize_output_codec_tag(self, output_av_container: OutputContainer) -> None:
-        """Ensure codec tags are compatible with MP4/MOV style containers."""
+        """Ensure codec tags are compatible with output container format."""
 
-        in_codec_ctx = self.in_stream.codec_context
-        codec_name = in_codec_ctx.name
         container_name = output_av_container.format.name.lower() if output_av_container.format.name else ''
-
-        if not any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm')):
-            return
-
         out_codec_ctx = cast(CodecContext, self.out_stream.codec_context)
-        if codec_name == 'h264' and self._is_mpegts_h264_tag(out_codec_ctx.codec_tag):
+        # Use input codec name since output codec_context.name may be encoder name (e.g., 'libx265')
+        in_codec_name = self.in_stream.codec_context.name
+
+        is_mp4_mov_mkv = any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm'))
+        is_mp4_or_mov = any(name in container_name for name in ('mp4', 'mov'))
+
+        # Normalize MPEG-TS codec tags for MP4/MOV/MKV containers
+        if is_mp4_mov_mkv and in_codec_name == 'h264' and self._is_mpegts_h264_tag(out_codec_ctx.codec_tag):
             out_codec_ctx.codec_tag = 'avc1'
-        elif codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(out_codec_ctx.codec_tag):
+
+        # For HEVC in MP4/MOV: use hev1 to keep VPS/SPS/PPS inline in the bitstream.
+        # hvc1 strips parameter sets to extradata, but smartcut's x265-encoded segments
+        # need their own VPS/SPS/PPS inline (via repeat-headers=1) since they differ from
+        # the source encoder's. hev1 allows both extradata and inline parameter sets.
+        if is_mp4_or_mov and in_codec_name in ('hevc', 'h265'):
+            out_codec_ctx.codec_tag = 'hev1'
+        elif is_mp4_mov_mkv and in_codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(out_codec_ctx.codec_tag):
             out_codec_ctx.codec_tag = 'hvc1'
 
     @staticmethod
-    def _is_mpegts_h264_tag(codec_tag: int | bytes | str) -> bool:
-        if isinstance(codec_tag, int):
-            return codec_tag == 27
-        if isinstance(codec_tag, bytes):
-            return codec_tag == b'\x1b\x00\x00\x00'
-        if isinstance(codec_tag, str):
-            return codec_tag == '\x1b\x00\x00\x00'
-        return False
+    def _is_mpegts_h264_tag(codec_tag: str) -> bool:
+        """Check if codec tag is MPEG-TS style H.264 tag."""
+        return codec_tag == '\x1b\x00\x00\x00'
 
     @staticmethod
-    def _is_mpegts_hevc_tag(codec_tag: int | bytes | str) -> bool:
-        if isinstance(codec_tag, int):
-            return codec_tag == 36
-        if isinstance(codec_tag, bytes):
-            return codec_tag in (b'HEVC', b'\x24\x00\x00\x00')
-        if isinstance(codec_tag, str):
-            return codec_tag in ('HEVC', '\x24\x00\x00\x00')
-        return False
+    def _is_mpegts_hevc_tag(codec_tag: str) -> bool:
+        """Check if codec tag is MPEG-TS style HEVC tag."""
+        return codec_tag in ('HEVC', '\x24\x00\x00\x00')
 
     def init_encoder(self) -> None:
         self.encoder_inited = True

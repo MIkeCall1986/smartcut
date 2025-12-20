@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -270,6 +271,34 @@ def test_h265_zcam() -> None:
 
     output_path = test_h265_zcam.__name__ + '.mov'
     run_smartcut_test(test_path, output_path, n_cuts=1, audio_export_info='auto')
+
+
+def test_h265_zcam_containers() -> None:
+    """Test smartcut with ZCAM HEVC converted to different containers.
+
+    Converts zcam.mov to MP4 and MKV, then tests smartcut on each.
+    This verifies the hev1 codec tag handling works correctly across containers.
+    """
+    source_path = get_media_test_data_file("zcam.mov")
+
+    # Test MP4 container
+    mp4_path = 'test_zcam_converted.mp4'
+    if not os.path.exists(mp4_path):
+        subprocess.run([
+            'ffmpeg', '-y', '-i', source_path,
+            '-c', 'copy', mp4_path
+        ], check=True, capture_output=True)
+    run_smartcut_test(mp4_path, 'test_zcam_mp4_out.mp4', n_cuts=1, audio_export_info='auto')
+
+    # Test MKV container
+    mkv_path = 'test_zcam_converted.mkv'
+    if not os.path.exists(mkv_path):
+        subprocess.run([
+            'ffmpeg', '-y', '-i', source_path,
+            '-c', 'copy', mkv_path
+        ], check=True, capture_output=True)
+    run_smartcut_test(mkv_path, 'test_zcam_mkv_out.mkv', n_cuts=1, audio_export_info='auto')
+
 
 def test_hevc_mkv_no_dts_remux() -> None:
     """Test that smartcut handles HEVC MKV files with DTS=N/A packets.
@@ -1428,6 +1457,7 @@ def get_test_categories() -> dict[str, list]:
             test_testvideos_jellyfish_h265,
             test_libde265_tears_of_steel_h265,
             test_h265_zcam,
+            test_h265_zcam_containers,
         ],
 
         'real_world_vp9': [
