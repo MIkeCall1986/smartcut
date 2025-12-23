@@ -23,6 +23,7 @@ from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_fo
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type
 
+
 class ProgressCallback(Protocol):
     """Protocol for progress callback objects."""
     def emit(self, value: int) -> None:
@@ -952,6 +953,10 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if media_container.video_stream is not None and include_video:
                 generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
 
+            if external_generator_factories:
+                for factory in external_generator_factories:
+                    generators.append(factory(output_av_container))
+
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and  track_export_settings.codec == 'passthru':
@@ -959,10 +964,6 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 generators.append(SubtitleCutter(media_container, output_av_container, sub_track_i))
-
-            if external_generator_factories:
-                for factory in external_generator_factories:
-                    generators.append(factory(output_av_container))
 
             output_av_container.start_encoding()
             if progress is not None:

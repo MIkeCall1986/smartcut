@@ -154,25 +154,6 @@ def validate_video_container_compat(encoder_name: str, container_ext: str) -> li
 
     return errors
 
-def infer_audio_codec_warnings(container_ext: str, has_any_audio: bool, has_mix_track: bool) -> list[str]:
-    """Return informational warnings about implied audio codecs by container.
-
-    This does not block export and is intended for user visibility.
-    """
-    warnings: list[str] = []
-    ext = container_ext.lower().lstrip('.')
-
-    if not has_any_audio:
-        return warnings
-
-    if ext == 'mp3':
-        if has_mix_track:
-            warnings.append("Mixed audio will be re-encoded to MP3 format")
-    elif ext == 'ogg':
-        warnings.append("Audio will be encoded using Vorbis or Opus codec")
-
-    return warnings
-
 def validate_audio_track_limits_for_container(container_ext: str, total_audio_tracks: int) -> list[str]:
     """Validate total audio track count for a given container.
 

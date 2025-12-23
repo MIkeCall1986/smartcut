@@ -260,7 +260,7 @@ time formats:
     else:
         raise ValueError("You must specify either --keep or --cut.")
 
-    # Default audio settings: no mix, include all tracks with lossless passthru
+    # Default audio settings: include all tracks with lossless passthru
     audio_settings: list[AudioExportSettings | None] = [AudioExportSettings(codec='passthru')] * len(source.audio_tracks)
     export_info = AudioExportInfo(output_tracks=audio_settings)
 
