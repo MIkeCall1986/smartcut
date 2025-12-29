@@ -8,12 +8,12 @@ from typing import Protocol, TypeAlias, cast
 import av
 import av.bitstream
 import numpy as np
-from av import VideoCodecContext, VideoStream
+from av import AudioStream, VideoCodecContext, VideoStream
 from av.codec.context import CodecContext
 from av.container.input import InputContainer
 from av.container.output import OutputContainer
 from av.packet import Packet
-from av.stream import Disposition
+from av.stream import Disposition, Stream
 from av.video.frame import PictureType, VideoFrame
 
 from smartcut.media_container import MediaContainer
@@ -21,6 +21,26 @@ from smartcut.media_container import MediaContainer
 __version__ = "1.7"
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
+
+# Re-export for backwards compatibility (tests import these from cut_video)
+__all__ = [
+    "AudioExportInfo",
+    "AudioExportSettings",
+    "CutSegment",
+    "PassthruAudioCutter",
+    "SubtitleCutter",
+    "VideoCutter",
+    "VideoExportMode",
+    "VideoExportQuality",
+    "VideoSettings",
+    "VideoStreamSetup",
+    "create_audio_output_stream",
+    "create_subtitle_output_stream",
+    "create_video_output_stream",
+    "make_adjusted_segment_times",
+    "make_cut_segments",
+    "smart_cut",
+]
 from smartcut.nal_tools import get_h265_nal_unit_type, is_leading_picture_nal_type
 
 
@@ -129,18 +149,44 @@ def make_cut_segments(media_container: MediaContainer,
 
     return cut_segments
 
+
+def create_audio_output_stream(
+    media_container: MediaContainer,
+    output_av_container: OutputContainer,
+    track_index: int,
+) -> AudioStream:
+    """
+    Create output audio stream from source media container.
+
+    Separated from PassthruAudioCutter to allow reuse in joining operations.
+    """
+    track = media_container.audio_tracks[track_index]
+    out_stream = output_av_container.add_stream_from_template(
+        track.av_stream,
+        options={'x265-params': 'log_level=error'}
+    )
+    out_stream.metadata.update(track.av_stream.metadata)
+    out_stream.disposition = cast(Disposition, track.av_stream.disposition.value)
+    return out_stream
+
+
 class PassthruAudioCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer,
-                track_index: int, export_settings: AudioExportSettings) -> None:
+    def __init__(
+        self,
+        media_container: MediaContainer,
+        out_stream: AudioStream,
+        track_index: int,
+        initial_position: Fraction = Fraction(0),
+        initial_prev_dts: int = -100_000,
+        initial_prev_pts: int = -100_000,
+    ) -> None:
         self.track = media_container.audio_tracks[track_index]
+        self.out_stream = out_stream
 
-        self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
-
-        self.out_stream.metadata.update(self.track.av_stream.metadata)
-        self.out_stream.disposition = cast(Disposition, self.track.av_stream.disposition.value)
-        self.segment_start_in_output = 0
-        self.prev_dts = -100_000
-        self.prev_pts = -100_000
+        # Output position state - can be set for joining multiple files
+        self.segment_start_in_output = initial_position
+        self.prev_dts = initial_prev_dts
+        self.prev_pts = initial_prev_pts
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
         in_tb = cast(Fraction, self.track.av_stream.time_base)
@@ -177,17 +223,41 @@ class PassthruAudioCutter:
     def finish(self) -> list[Packet]:
         return []
 
-class SubtitleCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, subtitle_track_index: int) -> None:
-        self.track_i = subtitle_track_index
-        self.packets = media_container.subtitle_tracks[subtitle_track_index]
 
-        self.in_stream = media_container.av_container.streams.subtitles[subtitle_track_index]
-        self.out_stream = output_av_container.add_stream_from_template(self.in_stream)
-        self.out_stream.metadata.update(self.in_stream.metadata)
-        self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
-        self.segment_start_in_output = 0
-        self.prev_pts = -100_000
+def create_subtitle_output_stream(
+    media_container: MediaContainer,
+    output_av_container: OutputContainer,
+    track_index: int,
+) -> Stream:
+    """
+    Create output subtitle stream from source media container.
+
+    Separated from SubtitleCutter to allow reuse in joining operations.
+    """
+    in_stream = media_container.av_container.streams.subtitles[track_index]
+    out_stream = output_av_container.add_stream_from_template(in_stream)
+    out_stream.metadata.update(in_stream.metadata)
+    out_stream.disposition = cast(Disposition, in_stream.disposition.value)
+    return out_stream
+
+
+class SubtitleCutter:
+    def __init__(
+        self,
+        media_container: MediaContainer,
+        out_stream: Stream,
+        track_index: int,
+        initial_position: Fraction = Fraction(0),
+        initial_prev_pts: int = -100_000,
+    ) -> None:
+        self.track_i = track_index
+        self.packets = media_container.subtitle_tracks[track_index]
+        self.in_stream = media_container.av_container.streams.subtitles[track_index]
+        self.out_stream = out_stream
+
+        # Output position state - can be set for joining multiple files
+        self.segment_start_in_output = initial_position
+        self.prev_pts = initial_prev_pts
 
         self.current_packet_i = 0
 
@@ -236,8 +306,139 @@ class VideoSettings:
     quality: VideoExportQuality
     codec_override: str = 'copy'
 
+
+@dataclass
+class VideoStreamSetup:
+    """Result of creating a video output stream, used to initialize VideoCutter."""
+    out_stream: VideoStream
+    codec_name: str
+    is_full_recode: bool  # True if VideoExportMode.RECODE with codec override
+
+
+def create_video_output_stream(
+    media_container: MediaContainer,
+    output_av_container: OutputContainer,
+    video_settings: VideoSettings,
+) -> VideoStreamSetup:
+    """
+    Create output video stream from source media container.
+
+    Separated from VideoCutter to allow reuse in joining operations where
+    multiple input files write to the same output stream.
+    """
+    in_stream = cast(VideoStream, media_container.video_stream)
+    assert in_stream.time_base is not None, "Video stream must have a time_base"
+
+    if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
+        # Full recode mode with explicit codec
+        out_stream = cast(VideoStream, output_av_container.add_stream(
+            video_settings.codec_override,
+            rate=in_stream.guessed_rate,
+            options={'x265-params': 'log_level=error'}
+        ))
+        out_stream.width = in_stream.width
+        out_stream.height = in_stream.height
+        if in_stream.sample_aspect_ratio is not None:
+            out_stream.sample_aspect_ratio = in_stream.sample_aspect_ratio
+        out_stream.metadata.update(in_stream.metadata)
+        out_stream.disposition = cast(Disposition, in_stream.disposition.value)
+        out_stream.time_base = in_stream.time_base
+        codec_name = video_settings.codec_override
+        is_full_recode = True
+    else:
+        # Smartcut/copy mode - preserve codec from input
+        original_codec_name = in_stream.codec_context.name
+
+        codec_mapping = {
+            'libdav1d': 'libaom-av1',  # AV1 decoder to encoder
+        }
+        mapped_codec_name = codec_mapping.get(original_codec_name, original_codec_name)
+
+        if mapped_codec_name != original_codec_name:
+            # Need to create stream with mapped codec name
+            out_stream = cast(VideoStream, output_av_container.add_stream(
+                mapped_codec_name,
+                rate=in_stream.guessed_rate
+            ))
+            out_stream.width = in_stream.width
+            out_stream.height = in_stream.height
+            if in_stream.sample_aspect_ratio is not None:
+                out_stream.sample_aspect_ratio = in_stream.sample_aspect_ratio
+            out_stream.metadata.update(in_stream.metadata)
+            out_stream.disposition = cast(Disposition, in_stream.disposition.value)
+            out_stream.time_base = in_stream.time_base
+            codec_name = mapped_codec_name
+        else:
+            # Copy the stream if no mapping needed
+            out_stream = output_av_container.add_stream_from_template(
+                in_stream,
+                options={'x265-params': 'log_level=error'}
+            )
+            out_stream.metadata.update(in_stream.metadata)
+            out_stream.disposition = cast(Disposition, in_stream.disposition.value)
+            out_stream.time_base = in_stream.time_base
+            codec_name = original_codec_name
+
+        is_full_recode = False
+
+    # Note: Codec tag normalization is done in VideoCutter.__init__ after bitstream filter setup
+
+    assert out_stream.time_base is not None, "Output stream must have a time_base"
+
+    return VideoStreamSetup(
+        out_stream=out_stream,
+        codec_name=codec_name,
+        is_full_recode=is_full_recode,
+    )
+
+
+def _normalize_output_codec_tag(
+    out_stream: VideoStream,
+    output_av_container: OutputContainer,
+    in_stream: VideoStream,
+) -> None:
+    """Ensure codec tags are compatible with output container format."""
+    container_name = output_av_container.format.name.lower() if output_av_container.format.name else ''
+    out_codec_ctx = cast(CodecContext, out_stream.codec_context)
+    in_codec_ctx = in_stream.codec_context
+    in_codec_name = in_codec_ctx.name
+
+    is_mp4_mov_mkv = any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm'))
+    is_mp4_or_mov = any(name in container_name for name in ('mp4', 'mov'))
+
+    # Normalize MPEG-TS codec tags for MP4/MOV/MKV containers
+    # Check INPUT stream's codec_tag since output may not have been populated yet
+    if is_mp4_mov_mkv and in_codec_name == 'h264' and _is_mpegts_h264_tag(in_codec_ctx.codec_tag):
+        out_codec_ctx.codec_tag = 'avc1'
+
+    # For HEVC in MP4/MOV: use hev1 to keep VPS/SPS/PPS inline
+    if is_mp4_or_mov and in_codec_name in ('hevc', 'h265'):
+        out_codec_ctx.codec_tag = 'hev1'
+    elif is_mp4_mov_mkv and in_codec_name in ('hevc', 'h265') and _is_mpegts_hevc_tag(in_codec_ctx.codec_tag):
+        out_codec_ctx.codec_tag = 'hvc1'
+
+
+def _is_mpegts_h264_tag(codec_tag: str) -> bool:
+    """Check if codec tag is MPEG-TS style H.264 tag."""
+    return codec_tag == '\x1b\x00\x00\x00'
+
+
+def _is_mpegts_hevc_tag(codec_tag: str) -> bool:
+    """Check if codec tag is MPEG-TS style HEVC tag."""
+    return codec_tag in ('HEVC', '\x24\x00\x00\x00')
+
+
 class VideoCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, video_settings: VideoSettings, log_level: str | None) -> None:
+    def __init__(
+        self,
+        media_container: MediaContainer,
+        stream_setup: VideoStreamSetup,
+        output_av_container: OutputContainer,
+        video_settings: VideoSettings,
+        log_level: str | None,
+        initial_position: Fraction = Fraction(0),
+        initial_last_dts: int = -100_000_000,
+    ) -> None:
         self.media_container = media_container
         self.log_level = log_level
         self.encoder_inited = False
@@ -257,21 +458,16 @@ class VideoCutter:
         self.demux_saved_packet = None
 
         # Frame buffering for fetch_frame (using heap for efficient PTS ordering)
-        self.frame_buffer = []
+        self.frame_buffer: list[FrameHeapItem] = []
         self.frame_buffer_gop_dts = -1
         self.decoder = self.in_stream.codec_context
 
-        if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
-            self.out_stream = cast(VideoStream, output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'}))
-            self.out_stream.width = self.in_stream.width
-            self.out_stream.height = self.in_stream.height
-            if self.in_stream.sample_aspect_ratio is not None:
-                self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
-            self.out_stream.metadata.update(self.in_stream.metadata)
-            self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
-            self.out_stream.time_base = self.in_time_base
-            self.codec_name = video_settings.codec_override
+        # Use pre-created output stream from stream_setup
+        self.out_stream = stream_setup.out_stream
+        self.codec_name = stream_setup.codec_name
 
+        if stream_setup.is_full_recode:
+            # Full recode mode - initialize encoder immediately
             self.init_encoder()
             self.enc_codec = self.out_stream.codec_context
             self.enc_codec.options.update(self.encoding_options)
@@ -279,39 +475,7 @@ class VideoCutter:
             self.enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
         else:
-            # Map codec name for decoder to encoder compatibility (AV1 case)
-            original_codec_name = self.in_stream.codec_context.name
-
-            codec_mapping = {
-                'libdav1d': 'libaom-av1',  # AV1 decoder to encoder
-            }
-
-            mapped_codec_name = codec_mapping.get(original_codec_name, original_codec_name)
-
-            if mapped_codec_name != original_codec_name:
-                # Need to create stream with mapped codec name. Can't use copy from template b/c codec name has changed
-                self.out_stream = cast(VideoStream, output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate))
-                self.out_stream.width = self.in_stream.width
-                self.out_stream.height = self.in_stream.height
-                if self.in_stream.sample_aspect_ratio is not None:
-                    self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
-                self.out_stream.metadata.update(self.in_stream.metadata)
-                self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
-                self.out_stream.time_base = self.in_stream.time_base
-                self.codec_name = mapped_codec_name
-            else:
-                # Copy the stream if no mapping needed
-                self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
-                self.out_stream.metadata.update(self.in_stream.metadata)
-                self.out_stream.disposition = cast(Disposition, self.in_stream.disposition.value)
-                self.out_stream.time_base = self.in_stream.time_base
-                self.codec_name = original_codec_name
-
-
-            # if self.codec_name == 'mpeg2video':
-                # self.out_stream.average_rate = self.in_stream.average_rate
-                # self.out_stream.base_rate = self.in_stream.base_rate
-
+            # Smartcut mode - set up bitstream filter for remuxing
             self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('null', self.in_stream, self.out_stream)
             if self.in_stream.codec_context.name == 'h264' and not is_annexb(self.in_stream.codec_context.extradata):
                 self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('h264_mp4toannexb', self.in_stream, self.out_stream)
@@ -321,55 +485,22 @@ class VideoCutter:
             elif self.in_stream.codec_context.name in {'mpeg4', 'msmpeg4v3', 'msmpeg4v2', 'msmpeg4v1'}:
                 self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('dump_extra', self.in_stream, self.out_stream)
 
-        self._normalize_output_codec_tag(output_av_container)
+        # Normalize codec tags for container compatibility (must be done after bitstream filter setup)
+        _normalize_output_codec_tag(self.out_stream, output_av_container, self.in_stream)
 
         # Assert out_stream time_base is not None once at initialization
         assert self.out_stream.time_base is not None, "Output stream must have a time_base"
         self.out_time_base: Fraction = self.out_stream.time_base
 
-        self.last_dts = -100_000_000
-
-        self.segment_start_in_output = 0
+        # Output position state - can be set for joining multiple files
+        self.last_dts = initial_last_dts
+        self.segment_start_in_output = initial_position
 
         # Track stream continuity for hybrid CRA recoding
         self.last_remuxed_segment_gop_index = None
         self.is_first_remuxed_segment = True
         # Track decoder continuity between GOPs: last GOP end DTS consumed
         self._last_fetch_end_dts: int | None = None
-
-    def _normalize_output_codec_tag(self, output_av_container: OutputContainer) -> None:
-        """Ensure codec tags are compatible with output container format."""
-
-        container_name = output_av_container.format.name.lower() if output_av_container.format.name else ''
-        out_codec_ctx = cast(CodecContext, self.out_stream.codec_context)
-        # Use input codec name since output codec_context.name may be encoder name (e.g., 'libx265')
-        in_codec_name = self.in_stream.codec_context.name
-
-        is_mp4_mov_mkv = any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm'))
-        is_mp4_or_mov = any(name in container_name for name in ('mp4', 'mov'))
-
-        # Normalize MPEG-TS codec tags for MP4/MOV/MKV containers
-        if is_mp4_mov_mkv and in_codec_name == 'h264' and self._is_mpegts_h264_tag(out_codec_ctx.codec_tag):
-            out_codec_ctx.codec_tag = 'avc1'
-
-        # For HEVC in MP4/MOV: use hev1 to keep VPS/SPS/PPS inline in the bitstream.
-        # hvc1 strips parameter sets to extradata, but smartcut's x265-encoded segments
-        # need their own VPS/SPS/PPS inline (via repeat-headers=1) since they differ from
-        # the source encoder's. hev1 allows both extradata and inline parameter sets.
-        if is_mp4_or_mov and in_codec_name in ('hevc', 'h265'):
-            out_codec_ctx.codec_tag = 'hev1'
-        elif is_mp4_mov_mkv and in_codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(out_codec_ctx.codec_tag):
-            out_codec_ctx.codec_tag = 'hvc1'
-
-    @staticmethod
-    def _is_mpegts_h264_tag(codec_tag: str) -> bool:
-        """Check if codec tag is MPEG-TS style H.264 tag."""
-        return codec_tag == '\x1b\x00\x00\x00'
-
-    @staticmethod
-    def _is_mpegts_hevc_tag(codec_tag: str) -> bool:
-        """Check if codec tag is MPEG-TS style HEVC tag."""
-        return codec_tag in ('HEVC', '\x24\x00\x00\x00')
 
     def init_encoder(self) -> None:
         self.encoder_inited = True
@@ -951,7 +1082,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             generators = []
             if media_container.video_stream is not None and include_video:
-                generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
+                video_stream_setup = create_video_output_stream(media_container, output_av_container, video_settings)
+                generators.append(VideoCutter(media_container, video_stream_setup, output_av_container, video_settings, log_level))
 
             if external_generator_factories:
                 for factory in external_generator_factories:
@@ -959,11 +1091,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
-                    if track_export_settings is not None and  track_export_settings.codec == 'passthru':
-                        generators.append(PassthruAudioCutter(media_container, output_av_container, track_i, track_export_settings))
+                    if track_export_settings is not None and track_export_settings.codec == 'passthru':
+                        audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
+                        generators.append(PassthruAudioCutter(media_container, audio_out_stream, track_i))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
-                generators.append(SubtitleCutter(media_container, output_av_container, sub_track_i))
+                subtitle_out_stream = create_subtitle_output_stream(media_container, output_av_container, sub_track_i)
+                generators.append(SubtitleCutter(media_container, subtitle_out_stream, sub_track_i))
 
             output_av_container.start_encoding()
             if progress is not None:
