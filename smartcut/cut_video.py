@@ -331,7 +331,7 @@ class VideoCutter:
 
         self.segment_start_in_output = 0
 
-        # Track stream continuity for CRA to BLA conversion
+        # Track stream continuity for hybrid CRA recoding
         self.last_remuxed_segment_gop_index = None
         self.is_first_remuxed_segment = True
         # Track decoder continuity between GOPs: last GOP end DTS consumed
@@ -547,7 +547,7 @@ class VideoCutter:
         else:
             packets = self.flush_encoder()
             packets.extend(self.remux_segment(cut_segment))
-            # Update tracking variables for CRA to BLA conversion
+            # Update tracking variables for hybrid CRA recoding
             self.last_remuxed_segment_gop_index = cut_segment.gop_index
             self.is_first_remuxed_segment = False
 
