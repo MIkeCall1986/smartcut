@@ -38,8 +38,11 @@ from test_utils import (
     to_fraction_segments,
 )
 
-from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
 from smartcut.media_container import MediaContainer
+from smartcut.media_utils import VideoExportMode, VideoExportQuality
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings
+from smartcut.smart_cut import make_cut_segments, smart_cut
+from smartcut.video_cutter import VideoSettings
 
 DEFAULT_SEED = 12345
 

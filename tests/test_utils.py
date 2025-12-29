@@ -18,8 +18,11 @@ from av import time_base as AV_TIME_BASE
 from av.container.input import InputContainer
 from av.stream import Disposition
 
-from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
 from smartcut.media_container import AudioTrack, MediaContainer
+from smartcut.media_utils import VideoExportMode, VideoExportQuality
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings
+from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments, smart_cut
+from smartcut.video_cutter import VideoSettings
 
 AV_TIME_BASE_VALUE: int = int(AV_TIME_BASE) if AV_TIME_BASE else 1
 
