@@ -206,8 +206,16 @@ class MediaContainer:
             if tracking_leading_in_cra:
                 self.gop_leading_end_dts.append(None if not current_gop_has_leading else last_seen_video_dts)
                 self.gop_has_rasl.append(current_gop_has_rasl)
-            if last_seen_video_dts is not None:
-                self.gop_end_times_dts.append(last_seen_video_dts)
+            # Ensure gop_end_times_dts has the same length as gop_start_times_dts.
+            # This is needed because make_cut_segments uses zip() which truncates to
+            # shortest length. When all packets have dts=None (can happen in short
+            # exported segments), last_seen_video_dts stays None, so we use the
+            # same sentinel value used for gop_start_times_dts when DTS is missing.
+            if len(self.gop_end_times_dts) < len(self.gop_start_times_dts):
+                fallback_dts = last_seen_video_dts if last_seen_video_dts is not None else -100_000_000
+                self.gop_end_times_dts.append(fallback_dts)
+            assert len(self.gop_start_times_dts) == len(self.gop_end_times_dts), \
+                f"GOP DTS array length mismatch: start={len(self.gop_start_times_dts)}, end={len(self.gop_end_times_dts)}"
             frame_pts_sorted = np.sort(np.array(frame_pts))
             self.video_frame_times_pts = frame_pts_sorted
             self.video_frame_times = frame_pts_sorted * self.video_stream.time_base
