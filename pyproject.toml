@@ -61,7 +61,7 @@ Changelog = "https://github.com/skeskinen/smartcut/blob/main/README.md#version-h
 smartcut = "smartcut.__main__:main"
 
 [tool.setuptools]
-packages = ["smartcut"]
+packages = ["smartcut", "smartcut.tests"]
 
 [tool.setuptools.package-data]
 smartcut = ["py.typed"]
