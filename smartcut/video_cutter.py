@@ -492,6 +492,7 @@ class VideoCutter:
             self.enc_last_pts = frame.pts
 
             frame.pict_type = PictureType.NONE
+            frame = self._scale_frame_if_needed(frame)
             result_packets.extend(self.enc_codec.encode(frame))
 
         if self.codec_name == 'mpeg2video':
@@ -648,6 +649,24 @@ class VideoCutter:
 
         self.enc_codec = None
         return result_packets
+
+    def _scale_frame_if_needed(self, frame: VideoFrame) -> VideoFrame:
+        """Scale frame to encoder dimensions if needed, using bilinear interpolation.
+
+        Stays in the same pixel format (no YUV->RGB conversion).
+        """
+        if self.enc_codec is None:
+            return frame
+
+        if frame.width == self.enc_codec.width and frame.height == self.enc_codec.height:
+            return frame
+
+        # reformat() preserves pts/time_base and keeps pixel format unchanged
+        return frame.reformat(
+            width=self.enc_codec.width,
+            height=self.enc_codec.height,
+            interpolation='BILINEAR'
+        )
 
     def fetch_packet(self, target_dts: int, end_dts: int) -> Generator[Packet, None, None]:
         # First, check if we have a saved packet from previous call
