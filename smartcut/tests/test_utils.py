@@ -389,7 +389,7 @@ def _infer_frame_count_anomaly(source_times: list[Fraction], result_times: list[
         return None
 
 
-def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0, allow_failed_pixels_per_frame: int = 0) -> None:
+def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0, allow_failed_pixels_per_frame: int = 0, timing_tolerance: Fraction | None = None) -> None:
     source_stream = source_container.video_stream
     result_stream = result_container.video_stream
     assert source_stream is not None, "Source container is missing a video stream"
@@ -434,11 +434,14 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     # input and output timebases are not multiples of each other.
     is_mpeg = source_container.av_container.format.name in ['mpegts', 'mpegvideo']
     is_avi = source_container.av_container.format.name == 'avi'
-    diff_tolerance = Fraction(3, 1000)
-    if is_mpeg:
-        diff_tolerance = 2
+    if timing_tolerance is not None:
+        diff_tolerance = timing_tolerance
+    elif is_mpeg:
+        diff_tolerance = Fraction(2)
     elif is_avi:
         diff_tolerance = Fraction(1, 10)
+    else:
+        diff_tolerance = Fraction(3, 1000)
 
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
