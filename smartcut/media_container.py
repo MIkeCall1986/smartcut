@@ -190,7 +190,8 @@ class MediaContainer:
                         self.gop_has_rasl.append(current_gop_has_rasl)
                         tracking_leading_in_cra = False
 
-                last_seen_video_dts = packet.dts
+                # Use PTS as fallback when DTS is None (common in exported segments)
+                last_seen_video_dts = packet.dts if packet.dts is not None else packet.pts
                 frame_pts.append(packet.pts)
             elif packet.stream.type == 'audio':
                 track = stream_index_to_audio_track[packet.stream_index]
