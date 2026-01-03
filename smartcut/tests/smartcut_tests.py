@@ -18,6 +18,7 @@ from av.stream import Disposition
 from test_utils import (
     cached_download,
     check_audio_pts_timestamps,
+    check_no_discard_packets,
     check_stream_dispositions,
     check_videos_equal,
     check_videos_equal_segment,
@@ -1347,6 +1348,68 @@ def test_mkv_attachment_preservation() -> None:
     assert input_attachments == output_attachments, "Attachment streams metadata mismatch after smart_cut"
 
 
+def test_no_discard_flag_on_output_packets() -> None:
+    """Verify that smartcut output never has video packets with discard flag set.
+
+    Regression test for a bug where the last frame in smartcut output had
+    AV_PKT_FLAG_DISCARD set, causing decoders to skip it and show "No frame available".
+
+    The bug manifests when the cut endpoint is at a time that causes the last frame
+    to be included at the exact boundary. For example, cutting to 81.033s (which is
+    81s + 1 frame at 30fps) causes frame 2431 to be included but marked with discard.
+
+    The key to reproducing is using an MP4 output (which uses edit lists) and
+    cutting to a time just beyond a frame boundary.
+    """
+    input_path = 'test_discard_flag_input.mkv'
+    create_test_video(input_path, 30, 'h264', 'yuv420p', 30, (256, 144))
+
+    source = MediaContainer(input_path)
+
+    # Cut to a time just past a frame boundary (e.g., 20 seconds + epsilon)
+    # At 30fps, each frame is 1/30 = 0.0333... seconds
+    # Cutting to 20.034s should include 601 frames (0-600, where frame 600 is at 20.0s)
+    output_path = test_no_discard_flag_on_output_packets.__name__ + '.mp4'
+    segments = [(Fraction(0), Fraction(20034, 1000))]  # 20.034 seconds
+
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    smart_cut(source, segments, output_path, video_settings=video_settings, log_level='warning')
+
+    # The key assertion: no packets should have discard flag
+    check_no_discard_packets(output_path)
+
+    source.close()
+
+
+def test_no_discard_flag_multiple_cuts() -> None:
+    """Verify no discard flags when cutting multiple segments from a video.
+
+    Tests that the discard flag issue doesn't appear with more complex
+    cut patterns involving multiple segments, including segments that end
+    just past a frame boundary.
+    """
+    input_path = 'test_discard_flag_multi_input.mkv'
+    create_test_video(input_path, 30, 'h264', 'yuv420p', 30, (256, 144))
+
+    source = MediaContainer(input_path)
+
+    # Multiple segments with gaps - tests segment boundaries
+    # Use times that are just past frame boundaries (at 30fps, frame duration is ~0.0333s)
+    output_path = test_no_discard_flag_multiple_cuts.__name__ + '.mp4'
+    segments = [
+        (Fraction(2), Fraction(8034, 1000)),   # Ends just past 8s
+        (Fraction(12), Fraction(18034, 1000)), # Ends just past 18s
+        (Fraction(22), Fraction(28034, 1000)), # Ends just past 28s - this is the final segment
+    ]
+
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    smart_cut(source, segments, output_path, video_settings=video_settings, log_level='warning')
+
+    check_no_discard_packets(output_path)
+
+    source.close()
+
+
 def get_test_categories() -> dict[str, list]:
     """
     Returns a dictionary of test categories.
@@ -1358,6 +1421,8 @@ def get_test_categories() -> dict[str, list]:
             test_h264_smart_cut,
             test_mp4_cut_on_keyframe,
             test_mp4_smart_cut,
+            test_no_discard_flag_on_output_packets,
+            test_no_discard_flag_multiple_cuts,
         ],
 
         'h264': [

@@ -978,6 +978,34 @@ def get_tears_of_steel_annexb() -> str:
     return ts_filename
 
 
+def check_no_discard_packets(output_path: str) -> None:
+    """Verify that no video packets in the output have the discard flag set.
+
+    The discard flag (AV_PKT_FLAG_DISCARD) tells decoders to skip the packet.
+    This should never be set on video packets in smartcut output - we either
+    copy packets directly or encode new ones, neither of which should produce
+    discard-flagged packets.
+
+    Raises:
+        AssertionError: If any video packet has is_discard=True
+    """
+    with av_open(output_path, mode='r') as container:
+        video_streams = [s for s in container.streams if s.type == 'video']
+        if not video_streams:
+            return  # No video to check
+
+        discard_packets: list[tuple[int, float | None]] = []
+        for packet in container.demux(video_streams[0]):
+            if packet.is_discard:
+                pts_time = float(packet.pts * packet.time_base) if packet.pts is not None and packet.time_base else None
+                discard_packets.append((packet.pts or -1, pts_time))
+
+        assert len(discard_packets) == 0, (
+            f"Found {len(discard_packets)} video packet(s) with discard flag set. "
+            f"First few: {discard_packets[:5]}"
+        )
+
+
 def get_testvideos_jellyfish_h265_ts() -> str:
     """Fetch Jellyfish HEVC sample and convert it to Annex B in an MPEG-TS container."""
     mp4_filename = cached_download(

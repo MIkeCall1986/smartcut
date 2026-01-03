@@ -247,6 +247,11 @@ class VideoCutter:
         assert self.out_stream.time_base is not None, "Output stream must have a time_base"
         self.out_time_base: Fraction = self.out_stream.time_base
 
+        # Track typical frame duration for fixing missing/zero durations
+        # MP4 muxer uses duration to calculate edit list boundaries, so
+        # packets without proper duration cause last-frame discard issues
+        self.typical_frame_duration: int | None = None
+
         # Output position state - can be set for joining multiple files
         self.last_dts = initial_last_dts
         self.segment_start_in_output = initial_position
@@ -382,6 +387,13 @@ class VideoCutter:
                 # Don't jump DTS up to match PTS - just increment minimally to preserve PTS >= DTS
                 packet.dts = self.last_dts + 1
             self.last_dts = packet.dts
+
+        # Fix packet duration - needed by MP4 muxer to output valid frames
+        # Track typical duration from valid packets, use it when duration is missing/zero
+        if packet.duration is not None and packet.duration > 0:
+            self.typical_frame_duration = packet.duration
+        elif self.typical_frame_duration is not None:
+            packet.duration = self.typical_frame_duration
 
     def _ensure_enc_codec(self) -> None:
         """Initialize enc_codec if not already set."""
