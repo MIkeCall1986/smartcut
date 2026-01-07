@@ -22,6 +22,13 @@ from smartcut.nal_tools import (
 def ts_to_time(ts: float) -> Fraction:
     return Fraction(round(ts*1000), 1000)
 
+
+def _multiply_array_by_fraction(args: tuple[np.ndarray, Fraction]) -> np.ndarray:
+    """Helper for parallel Fraction array multiplication (must be at module level for pickling)."""
+    arr, time_base = args
+    return arr * time_base
+
+
 @dataclass
 class AudioTrack:
     media_container: "MediaContainer"
@@ -107,6 +114,10 @@ class MediaContainer:
 
         first_keyframe = True  # Always allow the first keyframe regardless of NAL type
 
+        # Track max packet end PTS per stream (integer domain) for manual duration calc
+        # Converting to Fraction once at end is much faster than per-packet Fraction math
+        max_end_pts_by_stream: dict[int, int] = {}
+
         self.gop_start_times_dts = []
         self.gop_end_times_dts = []
         self.gop_start_nal_types = []
@@ -123,7 +134,10 @@ class MediaContainer:
                 continue
 
             if manual_duration_calc and (packet.pts is not None and packet.duration is not None):
-                self.duration = max(self.duration, (packet.pts + packet.duration) * packet.time_base)
+                stream_idx = packet.stream_index
+                end_pts = packet.pts + packet.duration
+                if stream_idx not in max_end_pts_by_stream or end_pts > max_end_pts_by_stream[stream_idx]:
+                    max_end_pts_by_stream[stream_idx] = end_pts
             if packet.stream.type == 'video' and self.video_stream:
 
                 if packet.is_keyframe:
@@ -202,6 +216,16 @@ class MediaContainer:
             elif packet.stream.type == 'subtitle':
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
 
+        # Finalize manual duration calculation - convert from PTS to Fraction once
+        if manual_duration_calc and max_end_pts_by_stream:
+            for stream_idx, max_pts in max_end_pts_by_stream.items():
+                stream = av_container.streams[stream_idx]
+                if stream.time_base is None:
+                    continue
+                stream_duration = Fraction(max_pts) * stream.time_base
+                if stream_duration > self.duration:
+                    self.duration = stream_duration
+
         if self.video_stream is not None:
             # Finalize last GOP's leading picture tracking if still active
             if tracking_leading_in_cra:
@@ -219,14 +243,34 @@ class MediaContainer:
                 f"GOP DTS array length mismatch: start={len(self.gop_start_times_dts)}, end={len(self.gop_end_times_dts)}"
             frame_pts_sorted = np.sort(np.array(frame_pts))
             self.video_frame_times_pts = frame_pts_sorted
-            self.video_frame_times = frame_pts_sorted * self.video_stream.time_base
 
-            self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
-
+        # Collect PTS arrays for audio tracks
         for t in self.audio_tracks:
             frame_pts_array = np.array(list(map(lambda p: p.pts, t.packets)))
             t.frame_times_pts = frame_pts_array
-            t.frame_times = frame_pts_array * t.av_stream.time_base
+
+        # Parallelize Fraction array multiplication (expensive due to per-element Fraction creation)
+        from concurrent.futures import ThreadPoolExecutor
+        tasks: list[tuple[np.ndarray, Fraction]] = []
+        if self.video_stream is not None and self.video_stream.time_base is not None:
+            tasks.append((self.video_frame_times_pts, self.video_stream.time_base))
+        for t in self.audio_tracks:
+            if t.av_stream.time_base is not None:
+                tasks.append((t.frame_times_pts, t.av_stream.time_base))
+
+        if tasks:
+            with ThreadPoolExecutor() as executor:
+                results = list(executor.map(_multiply_array_by_fraction, tasks))
+
+            result_idx = 0
+            if self.video_stream is not None and self.video_stream.time_base is not None:
+                self.video_frame_times = results[result_idx]
+                self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
+                result_idx += 1
+            for t in self.audio_tracks:
+                if t.av_stream.time_base is not None:
+                    t.frame_times = results[result_idx]
+                    result_idx += 1
 
     def close(self) -> None:
         self.av_container.close()
