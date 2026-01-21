@@ -16,69 +16,74 @@ def get_h265_nal_unit_type(packet_data: bytes) -> int | None:
     if not packet_data or len(packet_data) < 6:
         return None
 
-    data = bytes(packet_data)
+    data_len = len(packet_data)
 
     # H.265 in MP4 containers uses length-prefixed NAL units, not Annex B start codes
     # Try MP4/ISOBMFF format first (4-byte length prefix)
-    # But avoid false positive detection of Annex B start codes (0x00000001)
-    if len(data) >= 6:
-        # Read the first NAL unit length (big-endian 4 bytes)
-        nal_length = int.from_bytes(data[:4], byteorder='big')
-        # Avoid misinterpreting Annex B start codes as MP4 lengths
-        # Annex B start codes are 0x00000001 or 0x000001, which would be lengths 1 or very small
-        if nal_length > 4 and nal_length <= len(data) - 4:
-            # Found valid length-prefixed NAL units - scan all of them
-            nal_types_found = []
-            i = 0
-            while i < len(data) - 4:
-                nal_len = int.from_bytes(data[i:i+4], byteorder='big')
-                if nal_len < 2 or nal_len > len(data) - i - 4:
-                    break  # Invalid NAL length
-                if i + 5 < len(data):
-                    nal_type = (data[i + 4] >> 1) & 0x3F
-                    nal_types_found.append(nal_type)
-                    # Found safe keyframe - prioritize these
-                    if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
-                        return nal_type
-                i += 4 + nal_len
+    # Read the first NAL unit length (big-endian 4 bytes)
+    nal_length = int.from_bytes(packet_data[:4], byteorder='big')
+    # Avoid misinterpreting Annex B start codes as MP4 lengths
+    # Annex B start codes are 0x00000001 or 0x000001, which would be lengths 1 or very small
+    if nal_length > 4 and nal_length <= data_len - 4:
+        # Found valid length-prefixed NAL units - scan all of them
+        nal_types_found = []
+        i = 0
+        while i < data_len - 4:
+            nal_len = int.from_bytes(packet_data[i:i+4], byteorder='big')
+            if nal_len < 2 or nal_len > data_len - i - 4:
+                break  # Invalid NAL length
+            if i + 5 < data_len:
+                nal_type = (packet_data[i + 4] >> 1) & 0x3F
+                nal_types_found.append(nal_type)
+                # Found safe keyframe - prioritize these
+                if nal_type in (16, 17, 18, 19, 20):  # BLA or IDR frames
+                    return nal_type
+            i += 4 + nal_len
 
-            # No safe keyframes found, prioritize picture types (0-21) over metadata (32-40)
-            if nal_types_found:
-                # First check for CRA frames (21) - these are picture types but need special handling
-                for nal_type in nal_types_found:
-                    if nal_type == 21:  # CRA frame
-                        return nal_type
-                # Then check for any other picture NAL types (0-15)
-                for nal_type in nal_types_found:
-                    if 0 <= nal_type <= 15:  # Other picture types
-                        return nal_type
-                # Finally return first metadata type if no pictures found
-                return nal_types_found[0]
+        # No safe keyframes found, prioritize picture types (0-21) over metadata (32-40)
+        if nal_types_found:
+            # First check for CRA frames (21) - these are picture types but need special handling
+            for nal_type in nal_types_found:
+                if nal_type == 21:  # CRA frame
+                    return nal_type
+            # Then check for any other picture NAL types (0-15)
+            for nal_type in nal_types_found:
+                if 0 <= nal_type <= 15:  # Other picture types
+                    return nal_type
+            # Finally return first metadata type if no pictures found
+            return nal_types_found[0]
 
-    # Try Annex B format (start codes) - search entire packet for safe keyframes
+    # Try Annex B format (start codes) - use bytes.find() for fast C-level search
     nal_types_found = []
-    i = 0
-    while i < len(data) - 5:  # H.265 needs 2 bytes for NAL header
-        if data[i:i+4] == b'\x00\x00\x00\x01':
-            if i + 6 <= len(data):
-                nal_header = data[i+4:i+6]
-                nal_type = (nal_header[0] >> 1) & 0x3F
+    start_code_4 = b'\x00\x00\x00\x01'
+    start_code_3 = b'\x00\x00\x01'
+    pos = 0
+
+    while pos < data_len - 5:  # H.265 needs 2 bytes for NAL header after start code
+        # Search for 4-byte start code first
+        idx4 = packet_data.find(start_code_4, pos)
+        idx3 = packet_data.find(start_code_3, pos)
+
+        # No more start codes found
+        if idx4 == -1 and idx3 == -1:
+            break
+
+        # Use whichever comes first (prefer 4-byte if at same position)
+        if idx4 != -1 and (idx3 == -1 or idx4 <= idx3):
+            if idx4 + 6 <= data_len:
+                nal_type = (packet_data[idx4 + 4] >> 1) & 0x3F
                 nal_types_found.append(nal_type)
-                # Found safe keyframe - prioritize these
-                if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
+                if nal_type in (16, 17, 18, 19, 20):  # BLA or IDR frames
                     return nal_type
-            i += 4
-        elif data[i:i+3] == b'\x00\x00\x01':
-            if i + 5 <= len(data):
-                nal_header = data[i+3:i+5]
-                nal_type = (nal_header[0] >> 1) & 0x3F
-                nal_types_found.append(nal_type)
-                # Found safe keyframe - prioritize these
-                if nal_type in [16, 17, 18, 19, 20]:  # BLA or IDR frames
-                    return nal_type
-            i += 3
+            pos = idx4 + 4
         else:
-            i += 1
+            # idx3 comes first and isn't part of a 4-byte sequence
+            if idx3 + 5 <= data_len:
+                nal_type = (packet_data[idx3 + 3] >> 1) & 0x3F
+                nal_types_found.append(nal_type)
+                if nal_type in (16, 17, 18, 19, 20):  # BLA or IDR frames
+                    return nal_type
+            pos = idx3 + 3
 
     # No safe keyframes found, prioritize picture types (0-21) over metadata (32-40)
     if nal_types_found:
